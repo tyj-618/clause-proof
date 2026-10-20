@@ -27,3 +27,6 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+markers = [
+    "slow: 需要下载数据或调用真实模型的测试，默认不跑",
+]
