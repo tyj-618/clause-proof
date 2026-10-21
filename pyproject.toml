@@ -19,6 +19,7 @@ packages = ["src/clauseproof"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+include = ["*.py", "*.pyi"]
 exclude = [".uv-python"]
 
 [tool.ruff.lint]
