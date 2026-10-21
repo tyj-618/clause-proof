@@ -20,6 +20,4 @@
 - 不硬编码路径、模型名、阈值
 
 ## 提交（仅在 Owner 明确要求时执行）
-不要自行 commit 或 push。Owner 要求提交时，按以下格式：
-Conventional Commits，type ∈ {feat, fix, test, docs, refactor, chore}
-一个 commit 一件事；契约变更单独提交。
+不要自行 commit 或 push。提交格式见 CONTRIBUTING.md「分支与提交」。
