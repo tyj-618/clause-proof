@@ -9,15 +9,13 @@
 
 ## 状态
 
-| 阶段 | 状态 | 产出 |
-|---|---|---|
-| P0 项目治理 | ✅ | 工具链、协作约定、ADR |
+| P0 项目治理 | ✅ | 工具链、协作约定 |
 | P1 需求 | ✅ | [PRD-0001](docs/prd/0001-contract-clause-review.md) |
-| P2 设计与契约 | 🚧 | [架构](docs/design/0001-architecture.md) · [数据模型](docs/design/0002-data-model.md) · [接口](docs/design/0003-interfaces.md) · [错误语义](docs/design/0004-error-semantics.md) |
-| P3 测试策略 | ⏭ | — |
-| P4 实现 | ⏭ | — |
+| P2 设计与契约 | ✅ | [设计 0001–0004](docs/design/) · [ADR 0001–0006](docs/adr/README.md) |
+| P3 测试策略 | ✅ | 并入各任务书的验收标准 |
+| P4 实现 | 🚧 | T-001 数据模型完成（79 tests）；下一步模型调用层与引用定位 |
 
-**代码尚未开始。** 契约定稿前不写实现 —— 否则契约和测试都会变成给既有代码找理由。
+**当前进度**：数据模型与 19 条不变式已实现并测试；下一步实现 LLM 客户端与引用定位。
 
 ## 快速开始
 
@@ -33,5 +31,6 @@ make check     # lint + 测试，提交前必须通过
 | [PROJECT.md](PROJECT.md) | 项目章程：为什么做、边界、评测哲学 |
 | [PRD](docs/prd/) | 需求与验收标准 |
 | [design](docs/design/) | 架构、数据模型、接口契约、错误语义 |
+| [ADR](docs/adr/README.md) | 架构决策记录（含索引） |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 协作约定与提交规范 |
 | [CLAUDE.md](CLAUDE.md) | 给 AI 实现者的约束 |
