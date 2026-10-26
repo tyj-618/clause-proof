@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 状态 | Draft |
-| 版本 | 0.1 |
+| 版本 | 0.2 |
 | 上游 | [PRD-0001](../prd/0001-contract-clause-review.md)、[设计 0001](0001-architecture.md) |
 
 ## 1. 约束
@@ -65,6 +65,7 @@ class Judgment:
     quotes: tuple[str, ...]
     confidence: float
     raw_output: str      # 模型原始输出，保留以供审计
+    parse_ok: bool       # False = 解析失败，此时 present 被强制为 UNCERTAIN
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +151,7 @@ class RunMeta:
 | `Judgment` | `0.0 ≤ confidence ≤ 1.0` |
 | `Judgment` | `present == ABSENT` → `quotes == ()` |
 | `Judgment` | `present == PRESENT` → `len(quotes) ≥ 1` |
+| `Judgment` | `parse_ok == False` → `present is UNCERTAIN and confidence == 0.0` |
 | `Span` | `valid` → `start`、`end` 均非 None 且 `0 ≤ start < end` |
 | `Span` | `not valid` → `start is None and end is None` |
 | `Span` | `occurrences ≥ 0`；`valid` → `occurrences ≥ 1` |
@@ -191,3 +193,10 @@ class RunMeta:
 - 不引入 ORM / 数据库
 - 不做 schema 版本迁移：字段只增不改，改名视为破坏性变更，需走契约评审
 - 不允许 `Query` 出现 gold 相关字段，即使标注为可选
+
+## 10. 修订记录
+
+| 版本 | 日期 | 变更 |
+|---|---|---|
+| 0.1 | 2026-10-21 | 初稿 |
+| 0.2 | 2026-10-21 | `Judgment` 增加 `parse_ok`，区分解析失败与模型真不确定（见设计 0004 §3） |

@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 状态 | Draft |
-| 版本 | 0.1 |
+| 版本 | 0.2 |
 | 上游 | [设计 0001](0001-architecture.md)、[设计 0002](0002-data-model.md) |
 
 ## 1. 通用约定
@@ -133,7 +133,8 @@ class Judge(Protocol):
 - **后置**
   - 返回的 `Judgment` 必须已通过不变式校验
   - 模型输出无法解析时，返回 `Presence.UNCERTAIN`、`confidence=0.0`、`quotes=()`，**不抛错**
-  - 模型调用本身失败（重试耗尽）时抛 `RuntimeError`，由 `runner` 转为失败记录
+  - 解析成功时 `parse_ok=True`
+  - 模型输出无法解析时，返回 `Presence.UNCERTAIN`、`confidence=0.0`、`quotes=()`、`parse_ok=False`，**不抛错**
 - **`Protocol` 是刻意选择的**：`runner` 只依赖这个协议，测试时可注入假实现，无需真实模型（P2.5 的自检依赖这一点）
 
 ## 6. runner
@@ -226,3 +227,10 @@ def expected_calibration_error(
 2. **每条不变式一个测试**：0002 §7 的每一行对应至少一个断言
 3. **每个后置条件一个测试**：尤其是 `select_thresholds` 的确定性与 `dataset` 的两次调用一致性
 4. **往返一致**：`storage.append` → `read` 等值
+
+## 11. 修订记录
+
+| 版本 | 日期 | 变更 |
+|---|---|---|
+| 0.1 | 2026-10-21 | 初稿 |
+| 0.2 | 2026-10-26 | `judge` 后置条件补充 `parse_ok` 语义（见设计 0004 §3） |
