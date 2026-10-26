@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 状态 | Draft |
-| 版本 | 0.2 |
+| 版本 | 0.3 |
 | 上游 | [设计 0001](0001-architecture.md)、[设计 0002](0002-data-model.md) |
 
 ## 1. 通用约定
@@ -219,7 +219,91 @@ def expected_calibration_error(
   - 空输入 → `reliability_bins` 返回空元组，`expected_calibration_error` 返回 `None`
 - **调用关系**：`metrics.compute` 按条款类别调用 `reliability_bins` 与 `expected_calibration_error`，结果填入 `ClauseMetrics.ece`
 
-## 10. 契约自检要求
+## 10. llm（模型调用层）
+
+模型调用层的接口，分布在 `config` 与 `llm` 两个模块：
+
+```python
+@dataclass(frozen=True, slots=True)
+class LLMConfig:
+    base_url: str
+    api_key: str
+    model: str
+    max_tokens: int
+    reasoning_effort: str      # "low" | "high" | "max"
+    temperature: float
+    timeout_s: float
+    cache_dir: Path
+
+
+@dataclass(frozen=True, slots=True)
+class Prices:
+    input_cny_per_mtok: float
+    output_cny_per_mtok: float
+    cached_cny_per_mtok: float
+
+
+def load_config(env_file: Path | None = None) -> LLMConfig: ...
+def prices_for(model: str) -> Prices: ...
+
+
+@dataclass(frozen=True, slots=True)
+class Completion:
+    text: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
+    latency_ms: float
+    cached: bool
+    cache_written: bool
+    stop_reason: str | None
+    cost_cny: float
+
+
+class Transport(Protocol):
+    def post(self, url: str, payload: dict, headers: dict[str, str]) -> dict: ...
+
+
+class HttpxTransport:
+    """真实传输（httpx 直发）。项目中唯一允许发起网络请求的类（0001 §5 原则二）。"""
+    def __init__(self, timeout_s: float) -> None: ...
+    def post(self, url: str, payload: dict, headers: dict[str, str]) -> dict: ...
+
+
+class LLMClient:
+    def __init__(
+        self,
+        config: LLMConfig,
+        *,
+        transport: Transport | None = None,
+        cache_dir: Path | None = None,
+        max_retries: int = 3,
+    ) -> None: ...
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        max_tokens: int | None = None,
+    ) -> Completion: ...
+```
+
+- **后置**
+  - 缓存命中时不发起请求，返回 `cached=True`
+  - 磁盘缓存命中时 `cost_cny=0.0`（未发生计费），`latency_ms` 为本次本地读取耗时；input/output token 字段保留原始响应值，仅用于追溯，不参与成本计算
+  - 缓存写失败（磁盘满、权限等）时 `cache_written=False`，结果照常返回；写入成功或缓存命中时为 `True`。`cache_written=False` 只有一种情形：写入失败（异常），不影响本次结果的有效性
+  - 缓存目录来自运行时配置（`LLMConfig.cache_dir`），默认为 `<项目根>/.cache/llm`；不存在「默认关闭缓存」的路径
+  - 重试耗尽抛 `RuntimeError`；4xx（非 429）不重试
+  - 成本按「新输入 / 缓存命中 / 输出」三段计算，异常与日志不含 `api_key`
+  - `reasoning_effort` 经本端点发送时不生效：实测发送非法值 `"banana"` 仍返回 200，说明网关不校验该字段，实际推理档位为服务端默认值（max）。因此成本以响应 `usage` 实测为准，不按档位估算
+
+> 网络传输遵循 httpx 默认的代理环境变量行为；代理配置错误会表现为构造期失败，而非请求期失败。
+
+> 认证头使用 `Authorization: Bearer`，实测可被智谱 Anthropic 兼容端点接受（2026-10-26）。若将来切换端点后返回 401，优先改为 `x-api-key`。
+
+## 11. 契约自检要求
 
 以下测试是 P2.5 的交付内容，不是可选项：
 
@@ -228,9 +312,10 @@ def expected_calibration_error(
 3. **每个后置条件一个测试**：尤其是 `select_thresholds` 的确定性与 `dataset` 的两次调用一致性
 4. **往返一致**：`storage.append` → `read` 等值
 
-## 11. 修订记录
+## 12. 修订记录
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | 0.1 | 2026-10-21 | 初稿 |
 | 0.2 | 2026-10-26 | `judge` 后置条件补充 `parse_ok` 语义（见设计 0004 §3） |
+| 0.3 | 2026-10-26 | 补 llm 模块接口与 `cache_written` 语义 |
