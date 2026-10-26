@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 状态 | Draft |
-| 版本 | 0.2 |
+| 版本 | 0.3 |
 | 上游 | [PRD-0001](../prd/0001-contract-clause-review.md)、[设计 0001](0001-architecture.md) |
 
 ## 1. 约束
@@ -134,13 +134,15 @@ class RunMeta:
     config_digest: str   # 运行配置的哈希
     seed: int
     split: str           # "dev" | "report"
-    subset_spec: dict
+    n_contracts: int
+    strategy: str
     started_at: str      # ISO 8601，UTC
     n_queries: int
 ```
 
 ## 7. 不变式
 
+检查顺序：parse_ok 相关约束优先于 present / quotes 约束。这样解析失败的记录报出的是「解析失败」，而不是被下游约束抢先报错。
 违反任一条立即抛 `ValueError`，错误信息必须指出违反的字段与期望。
 
 | 类型 | 不变式 |
@@ -159,9 +161,10 @@ class RunMeta:
 | `Record` | `status != OK` → `judgment is None and spans == () and route is None` |
 | `Record` | `input_tokens ≥ 0`、`output_tokens ≥ 0`、`latency_ms ≥ 0` |
 | `Record` | `run_id`、`model`、`commit`、`prompt_hash`、`created_at` 均非空 |
+| `Record` | `status == OK` → `len(spans) == len(judgment.quotes)` |
 | `GoldLabel` | `has_answer == (len(spans) ≥ 1)` |
 | `GoldSpan` | `0 ≤ start < end`，且 `text` 非空 |
-| `RunMeta` | `0 ≤ seed < 2**63`；`split ∈ {"dev", "report"}` |
+| `RunMeta` | 0 ≤ seed < 2**63；split ∈ {"dev","report"}；n_contracts > 0；strategy 非空 |
 
 > `Judgment` 对 `UNCERTAIN` **不设 quotes 约束** —— 模糊态允许带引用，也允许不带。
 
@@ -199,4 +202,4 @@ class RunMeta:
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | 0.1 | 2026-10-21 | 初稿 |
-| 0.2 | 2026-10-21 | `Judgment` 增加 `parse_ok`，区分解析失败与模型真不确定（见设计 0004 §3） |
+| 0.2 | 2026-10-26 | `Judgment` 增加 `parse_ok`，区分解析失败与模型真不确定（见设计 0004 §3） |
