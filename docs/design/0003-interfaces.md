@@ -164,11 +164,13 @@ def run(
 ```python
 def build_queries(*, split: str, n_contracts: int, seed: int) -> tuple[Query, ...]
 def load_gold(*, split: str, n_contracts: int, seed: int) -> dict[str, GoldLabel]
+def load_gold_with_stats(*, split: str, n_contracts: int, seed: int) -> tuple[dict[str, GoldLabel], int]
 ```
 
 - **后置**
   - 同参数两次调用，返回的 `query_id` 序列完全相同（含顺序）
   - `build_queries` 的 `query_id` 集合 == `load_gold` 的键集合
+  - `load_gold_with_stats` 返回标注与被跳过的 gold span 数；`load_gold` 为其薄包装
   - `Query` 中不含任何 gold 字段
   - `split ∈ {"dev", "report"}`；两个 split 的合同集合不相交
 
