@@ -46,21 +46,46 @@ def apply_route(judgment: Judgment, threshold: float) -> Route
 - 引用质量**不参与**路由决策（降级已在 `judge` 完成）
 
 ```python
+@dataclass(frozen=True, slots=True)
+class RoutingPoint:
+    target_review_rate: float
+    actual_review_rate: float
+    auto_pass_accuracy: float | None    # 自动通过条目中判对的比例；无自动通过条目时 None
+    post_review_accuracy: float         # 1 − 自动通过且错误数 / 全部记录数
+    thresholds: dict[ClauseKey, float]
+
 def select_thresholds(
     records: Sequence[Record],
+    gold: Mapping[str, GoldLabel],
+    *,
     target_review_rate: float,
 ) -> dict[ClauseKey, float]
+
+def sweep(
+    records: Sequence[Record],
+    gold: Mapping[str, GoldLabel],
+    *,
+    review_rates: Sequence[float],
+) -> tuple[RoutingPoint, ...]
 ```
 
-- **纯度**：纯函数
-- **前置**：`records` 全部为 `status == OK`；`0 < target_review_rate ≤ 1`
+- **纯度**：纯函数（route 不 import metrics；「判定正确」口径同 §4，实现中复制该纯函数）
+- **前置**：`0 < target_review_rate ≤ 1`；`records` 可含失败记录（失败记录必然转人工）。
+  `gold` 用于判定「自动通过后是否仍正确」，故为必选参数
+- **候选集**：每类别 = 该类别 OK 记录实际出现过的 `confidence` 值（去重升序）∪ `{0.0, 1.0}`。
+  加入 `1.0` 是为了让 `target_review_rate == 1.0` 时能把各类别最高置信度的判定记录也推给人工
 - **后置**
-  - 返回恰好 6 个键
-  - 用返回的阈值重算，转人工率 ≤ `target_review_rate + 1e-9`
+  - `select_thresholds` 返回恰好 6 个键，值取自该类别候选集
+  - 用返回的阈值重算，转人工率 ≤ `target_review_rate + 1e-9`；转人工率 =
+    转人工条数 / 全部记录数，分母含失败记录
   - **确定性**：同一输入两次调用，返回完全相同的字典
-  - 每个类别的阈值必须取自该类别实际出现过的 `confidence` 值
+  - `target_review_rate` 低于不可约复核率（UNCERTAIN 与失败记录占比）时抛 `ValueError`，
+    消息含目标值与实际下界；`sweep` 遇不可满足点同样整体抛 `ValueError`（不跳过、不截断）
+  - `sweep` 返回长度等于 `review_rates` 的 tuple 且顺序一致；`review_rates` 升序时
+    `actual_review_rate` 单调不减
 - **目标**：在满足转人工率约束的前提下，最大化自动通过条目的准确率
-- **实现自由**：算法由实现决定（建议确定性贪心），但必须在模块 docstring 中写明，且满足上述确定性要求
+- **实现自由**：算法由实现决定（确定性贪心），但必须在模块 docstring 中写明，且满足上述确定性要求
+- **已知边界**：`confidence` 恰为 `1.0` 的记录无法被任何候选阈值推给人工（`apply_route` 的 `≥` 语义）
 
 ## 4. metrics
 
@@ -398,5 +423,6 @@ class LLMClient:
 | 0.3 | 2026-10-26 | 补 llm 模块接口与 `cache_written` 语义 |
 | 0.4 | 2026-10-27 | §10 增加 Backend 抽象（Anthropic / OpenAI）与 `LLMConfig.protocol`，端点与归一化规则见「协议与端点」（T-006） |
 | 0.5 | 2026-10-27 | 缓存键加入 protocol（跨协议不得命中旧缓存）；`LLMConfig.protocol` 默认值与 load_config 统一为 "openai" |
+| 0.6 | 2026-10-27 | §3 修正 `select_thresholds` 签名（增加 `gold` 参数），补 `RoutingPoint` 与 `sweep`；候选集含 `{0.0, 1.0}`，记录 confidence==1.0 的已知边界（T-008） |
 | 0.6 | 2026-10-27 | §4 Report/ClauseMetrics 扩展 T-007 全部字段并落定口径（成本由 token 重算、缓存命中记 0；p95 仅 OK 记录；split 由调用方传入）；§9 细化等频切分与桶合并规则 |
 | 0.7 | 2026-10-27 | §9 ECE 在非空桶数 <2 时返回 None（单桶不构成校准误差）；§4 Report 新增全局 `ece`，对外报告的校准指标以全局口径为准 |
