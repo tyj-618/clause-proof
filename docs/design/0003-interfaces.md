@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 状态 | Draft |
-| 版本 | 0.5 |
+| 版本 | 0.7 |
 | 上游 | [设计 0001](0001-architecture.md)、[设计 0002](0002-data-model.md) |
 
 ## 1. 通用约定
@@ -68,15 +68,17 @@ def select_thresholds(
 @dataclass(frozen=True, slots=True)
 class ClauseMetrics:
     clause: ClauseKey
-    n_total: int
-    n_decided: int                 # present ∈ {PRESENT, ABSENT}
-    n_uncertain: int
+    n_total: int                    # 该类别全部记录
+    n_ok: int                       # status == OK
+    n_failed: int                   # status != OK
+    n_decided: int                  # OK 且 present ∈ {PRESENT, ABSENT}
+    n_uncertain: int                # OK 且 present == UNCERTAIN
     n_correct: int
-    accuracy: float | None         # n_decided == 0 时为 None
+    accuracy: float | None          # n_correct / n_decided；n_decided==0 时 None
     accuracy_ci: tuple[float, float] | None
-    recall: float | None
-    precision: float | None
-    citation_iou: float | None
+    recall: float | None            # TP / (TP + FN)；分母为 0 时 None
+    precision: float | None         # TP / (TP + FP)；分母为 0 时 None
+    citation_iou: float | None      # 全部 gold span 的平均最大 IoU；无 gold span 时 None
     citation_contained: float | None
     citation_valid_rate: float | None
     ece: float | None
@@ -90,9 +92,19 @@ class Report:
     iou_threshold: float
     by_clause: tuple[ClauseMetrics, ...]   # 恰好 6 项，顺序同 ClauseKey 定义
     macro_accuracy: float | None
+    ece: float | None                      # 全局校准误差（见 §9）
     n_total: int
+    n_ok: int
+    n_failed: int
     n_uncertain: int
     uncertain_rate: float
+    total_cost_cny: float
+    mean_input_tokens: float
+    mean_output_tokens: float
+    p95_latency_ms: float
+
+
+def iou(a_start: int, a_end: int, b_start: int, b_end: int) -> float
 
 
 def compute(
@@ -100,17 +112,41 @@ def compute(
     gold: Mapping[str, GoldLabel],
     *,
     seed: int,
-    iou_threshold: float,
+    iou_threshold: float = 0.5,
+    split: str = "",
 ) -> Report
 ```
 
-- **纯度**：纯函数
-- **前置**：`records` 中的 `query_id` 与 `gold` 的键完全对应
+- **纯度**：纯函数（唯一外部依赖 `config.prices_for`，按每条记录的 model 查单价）
+- **前置**
+  - `records` 的 `query_id` 唯一且全部在 `gold` 中，违反抛 `ValueError`
+    （重复的消息含 id 与出现次数；缺失的消息含该 id）；`gold` 有多余条目不报错
+    （允许只评测子集）
 - **后置**
   - `by_clause` 恰好 6 项，顺序与 `ClauseKey` 定义一致
-  - `macro_accuracy` = 各类 `accuracy` 的算术平均，**`None` 的类别跳过**
-  - 相同输入 + 相同 `seed` → 返回对象逐字段相等
-  - 分母口径遵循 PRD 7.1、FR-7
+  - `macro_accuracy` = 各类 `accuracy` 的算术平均，**`None` 的类别跳过**；全为 None 时为 None
+  - 相同输入 + 相同 `seed` → 返回对象逐字段相等；`seed` 只影响 `accuracy_ci`
+  - 分母口径遵循 PRD 7.1、FR-7：`accuracy` 分母为 `n_decided`；`uncertain_rate`
+    分母为 `n_total`（含失败）；恒等式 `n_total == n_decided + n_uncertain + n_failed`
+    对每个类别与全局成立
+  - 判定正确 = `gold.has_answer` 与 `present`（PRESENT/ABSENT）一致（PRD §7.1 四象限）
+  - 引用指标只用 `span.valid == True` 的预测区间；`citation_iou` 对该类别每个 gold span
+    取与全部有效预测区间的最大 IoU 后求平均（未命中记 0），`citation_contained`
+    为有效预测区间完全落在某 gold span 内的比例，两者无 gold span 时为 None；
+    `citation_valid_rate` 分母为该类别全部 span 数（含 invalid），无 span 时为 None
+  - `iou_threshold` 本期不参与主指标计算，仅透传到 `Report` 备后续诊断口径使用
+  - `Report.ece` 为全局校准误差：pairs 为全部 `n_decided` 条记录的
+    (confidence, 是否判对)，跨条款类别聚合后按 §9 计算
+  - bootstrap：对各类别 `n_decided` 条判定有放回重采样 1000 次，取 2.5% 与 97.5%
+    分位（nearest-rank）；随机源 `random.Random(f"clauseproof:bootstrap:{seed}:{clause.value}")`
+  - `total_cost_cny`：`Record` 无 cost 字段，由 `prices_for(record.model)` 按
+    input/output token 重算；缓存命中（`cached=True`）与失败记录记 0
+    （见 §10：缓存命中未发生计费，token 字段仅用于追溯）
+  - `mean_input_tokens` / `mean_output_tokens` 分母为 `n_ok`，分子只含 OK 记录
+  - `p95_latency_ms` 仅对 OK 记录取 nearest-rank 分位（`ceil(0.95·n)−1`）；
+    失败记录的 `latency_ms` 为占位 0，非测量值，不参与
+  - `split` 无法从 `Record` / `GoldLabel` 推出（只有 `RunMeta` 有），由调用方
+    （cli）从 `RunMeta` 传入，缺省空串
 - `Report` 与 `ClauseMetrics` 定义在 `metrics` 模块中，不进 `models`（只有 `metrics` 产出、`cli` 消费）
 
 ## 5. judge（唯一模型出口，也是测试注入点）
@@ -213,14 +249,20 @@ def expected_calibration_error(
 ```
 
 - **纯度**：纯函数
-- **前置**：`pairs` 中每个 confidence 落在 [0, 1]
+- **前置**：`pairs` 中每个 confidence 落在 [0, 1]，越界抛 `ValueError`；`n_bins ≥ 1`、`min_bin_size ≥ 1`
 - **后置**
-  - **等频分桶**：按 confidence 升序排序后等分，每桶样本数相同（最后一桶可略多）
-  - 桶内样本数 < `min_bin_size` 时与相邻桶合并
-  - `mean_confidence` 为桶内 confidence 均值；`accuracy` 为桶内布尔值为真的比例
-  - `expected_calibration_error` = Σ(nᵢ/N)·|accᵢ − confᵢ|，N 为所有桶样本总数
+  - **等频分桶**：按 confidence 升序排序后等分，除最后一桶可略多外每桶样本数相同；
+    样本数不足 `n_bins` 时收缩桶数，保证每桶非空
+  - 桶内样本数 < `min_bin_size` 时合并：从头累积，累积量达到 `min_bin_size` 即封桶；
+    尾部残余并入前一个桶；全部样本不足时返回单桶。由此除单桶情形外每桶样本数
+    ≥ `min_bin_size`
+  - `lo` / `hi` 为桶内 confidence 的最小 / 最大值；`mean_confidence` 为桶内
+    confidence 均值；`accuracy` 为桶内布尔值为真的比例
+  - `expected_calibration_error` = Σ(nᵢ/N)·|accᵢ − confᵢ|，N 为所有桶样本总数；
+    非空桶数 < 2 时返回 `None`——单桶时该值退化为 |平均准确率 − 平均置信度|，
+    不构成校准误差，返回 `None` 以显式表示「样本不足以评估校准」
   - 空输入 → `reliability_bins` 返回空元组，`expected_calibration_error` 返回 `None`
-- **调用关系**：`metrics.compute` 按条款类别调用 `reliability_bins` 与 `expected_calibration_error`，结果填入 `ClauseMetrics.ece`
+- **调用关系**：`metrics.compute` 按条款类别调用 `reliability_bins` 与 `expected_calibration_error`（`n_bins=10`、`min_bin_size=30`），结果填入 `ClauseMetrics.ece`；分类别 ECE 在 `n_decided` 不足以形成 ≥2 个桶时为 `None`，对外报告的校准指标使用 `Report.ece`（全局）
 
 ## 10. llm（模型调用层）
 
@@ -356,3 +398,5 @@ class LLMClient:
 | 0.3 | 2026-10-26 | 补 llm 模块接口与 `cache_written` 语义 |
 | 0.4 | 2026-10-27 | §10 增加 Backend 抽象（Anthropic / OpenAI）与 `LLMConfig.protocol`，端点与归一化规则见「协议与端点」（T-006） |
 | 0.5 | 2026-10-27 | 缓存键加入 protocol（跨协议不得命中旧缓存）；`LLMConfig.protocol` 默认值与 load_config 统一为 "openai" |
+| 0.6 | 2026-10-27 | §4 Report/ClauseMetrics 扩展 T-007 全部字段并落定口径（成本由 token 重算、缓存命中记 0；p95 仅 OK 记录；split 由调用方传入）；§9 细化等频切分与桶合并规则 |
+| 0.7 | 2026-10-27 | §9 ECE 在非空桶数 <2 时返回 None（单桶不构成校准误差）；§4 Report 新增全局 `ece`，对外报告的校准指标以全局口径为准 |
