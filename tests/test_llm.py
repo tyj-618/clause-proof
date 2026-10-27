@@ -13,7 +13,13 @@ import pytest
 
 from clauseproof import llm
 from clauseproof.config import LLMConfig
-from clauseproof.llm import LLMClient, Transport
+from clauseproof.llm import (
+    AnthropicBackend,
+    Backend,
+    LLMClient,
+    OpenAIBackend,
+    Transport,
+)
 
 
 def _config(**overrides: object) -> LLMConfig:
@@ -27,6 +33,8 @@ def _config(**overrides: object) -> LLMConfig:
         timeout_s=5.0,
         # 每次全新目录：不显式覆盖 cache_dir 的用例不会命中彼此或上一次运行的缓存
         cache_dir=Path(tempfile.mkdtemp(prefix="clauseproof-test-cache-")),
+        # 现有用例全部针对 Anthropic 协议；openai 用例显式传 protocol="openai"
+        protocol="anthropic",
     )
     values.update(overrides)
     return LLMConfig(**values)
@@ -58,6 +66,28 @@ def _http_error(status: int) -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError(f"HTTP {status}", request=request, response=response)
 
 
+def _openai_response(
+    text: str | None = "判定结果",
+    *,
+    input_tokens: int = 10,
+    output_tokens: int = 5,
+    cached_input: int = 0,
+    finish_reason: str | None = "stop",
+    with_details: bool = True,
+) -> dict:
+    """OpenAI Chat Completions 形状的响应；text=None 模拟 content 为 null。"""
+    usage: dict = {"prompt_tokens": input_tokens, "completion_tokens": output_tokens}
+    if with_details:
+        usage["prompt_tokens_details"] = {"cached_tokens": cached_input}
+    return {
+        "model": "glm-5.3",
+        "choices": [
+            {"message": {"role": "assistant", "content": text}, "finish_reason": finish_reason}
+        ],
+        "usage": usage,
+    }
+
+
 class FakeTransport:
     """测试替身：先按脚本抛异常，之后返回固定响应；记录每次调用的 url / payload / headers。"""
 
@@ -84,9 +114,30 @@ def test_transports_satisfy_protocol() -> None:
     assert isinstance(FakeTransport(_response()), Transport)
 
 
+def test_backends_satisfy_protocol() -> None:
+    assert isinstance(AnthropicBackend(), Backend)
+    assert isinstance(OpenAIBackend(), Backend)
+
+
 def test_unknown_model_fails_at_construction() -> None:
     with pytest.raises(RuntimeError, match="gpt-4o"):
         LLMClient(_config(model="gpt-4o"), transport=FakeTransport(_response()))
+
+
+def test_unknown_protocol_fails_at_construction() -> None:
+    # load_config 已在入口拦截；这里是直接构造 LLMConfig 时的防线
+    with pytest.raises(RuntimeError, match="anthropic/openai"):
+        LLMClient(_config(protocol="grpc"), transport=FakeTransport(_response()))
+
+
+def test_explicit_backend_overrides_protocol_default() -> None:
+    transport = FakeTransport(_openai_response())
+    LLMClient(
+        _config(),  # protocol="anthropic"，默认会选 AnthropicBackend
+        transport=transport,
+        backend=OpenAIBackend(),
+    ).complete("问题")
+    assert transport.calls[0][0] == llm._OPENAI_CHAT_COMPLETIONS_URL
 
 
 # ---- 请求形态 ----
@@ -119,6 +170,111 @@ def test_system_omitted_when_none() -> None:
     transport = FakeTransport(_response())
     LLMClient(_config(), transport=transport).complete("问题")
     assert "system" not in transport.calls[0][1]
+
+
+# ---- OpenAI 协议请求形态 ----
+
+
+def test_openai_request_payload_shape() -> None:
+    transport = FakeTransport(_openai_response())
+    config = _config(max_tokens=777, temperature=0.25, reasoning_effort="medium", protocol="openai")
+    LLMClient(config, transport=transport).complete("用户问题", system="系统提示")
+    url, payload, headers = transport.calls[0]
+    # URL 由代码内置，与 config.base_url 无关（openai 协议下 base_url 不参与请求）
+    assert url == llm._OPENAI_CHAT_COMPLETIONS_URL
+    assert payload["model"] == "glm-5.3"
+    assert payload["max_tokens"] == 777
+    assert payload["temperature"] == 0.25
+    assert payload["reasoning_effort"] == "medium"
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["messages"] == [
+        {"role": "system", "content": "系统提示"},
+        {"role": "user", "content": "用户问题"},
+    ]
+    assert "system" not in payload  # system 只出现在 messages 里，不设顶层键
+    assert headers["Authorization"] == "Bearer sk-fake-secret"
+    assert headers["content-type"] == "application/json"
+    assert "anthropic-version" not in headers  # 该头是 Anthropic 协议专属
+
+
+def test_openai_system_omitted_when_none() -> None:
+    transport = FakeTransport(_openai_response())
+    LLMClient(_config(protocol="openai"), transport=transport).complete("问题")
+    assert transport.calls[0][1]["messages"] == [{"role": "user", "content": "问题"}]
+
+
+def test_openai_default_selected_by_protocol() -> None:
+    transport = FakeTransport(_openai_response())
+    LLMClient(_config(protocol="openai"), transport=transport).complete("问题")
+    assert transport.calls[0][0] == llm._OPENAI_CHAT_COMPLETIONS_URL
+
+
+# ---- OpenAI 协议解析与归一化 ----
+
+
+def test_openai_usage_mapping_and_cost() -> None:
+    response = _openai_response(
+        input_tokens=1_000_000, output_tokens=1_000_000, cached_input=500_000
+    )
+    transport = FakeTransport(response)
+    completion = LLMClient(_config(protocol="openai"), transport=transport).complete("问题")
+    assert completion.input_tokens == 1_000_000
+    assert completion.output_tokens == 1_000_000
+    assert completion.cached_input_tokens == 500_000
+    # 与 anthropic 路径同一套三段计价：50 万新输入 + 50 万缓存命中 + 100 万输出
+    assert completion.cost_cny == pytest.approx(33.0, abs=1e-9)
+
+
+def test_openai_null_content_treated_as_empty_text() -> None:
+    transport = FakeTransport(_openai_response(text=None, finish_reason="stop"))
+    completion = LLMClient(_config(protocol="openai"), transport=transport).complete("问题")
+    assert completion.text == ""
+    assert completion.stop_reason == "stop"
+
+
+def test_openai_missing_prompt_tokens_details_is_zero() -> None:
+    transport = FakeTransport(_openai_response(with_details=False))
+    completion = LLMClient(_config(protocol="openai"), transport=transport).complete("问题")
+    assert completion.cached_input_tokens == 0
+
+
+def test_openai_length_finish_reason_normalized_to_max_tokens() -> None:
+    transport = FakeTransport(_openai_response(finish_reason="length"))
+    completion = LLMClient(_config(protocol="openai"), transport=transport).complete("问题")
+    # 不归一化的话，上层按 stop_reason == "max_tokens" 的空正文保护不会触发
+    assert completion.stop_reason == "max_tokens"
+
+
+def test_openai_length_with_null_content_triggers_empty_text_guard() -> None:
+    """归一化的端到端效果：length + 空正文必须被识别为思考耗尽预算。"""
+    transport = FakeTransport(_openai_response(text=None, finish_reason="length"))
+    client = LLMClient(_config(protocol="openai"), transport=transport)
+    with pytest.raises(RuntimeError) as excinfo:
+        client.complete("问题")
+    assert "思考阶段耗尽预算" in str(excinfo.value)
+
+
+def test_openai_stop_finish_reason_passthrough() -> None:
+    transport = FakeTransport(_openai_response(finish_reason="stop"))
+    completion = LLMClient(_config(protocol="openai"), transport=transport).complete("问题")
+    assert completion.stop_reason == "stop"
+
+
+# ---- 协议切换与缓存 ----
+
+
+def test_cache_key_separates_protocols(tmp_path: Path) -> None:
+    """protocol 进缓存键：协议改变请求形态与响应分布，切换协议不共享缓存
+    （否则 token 与成本统计会命中另一端点生成的旧条目而失真）。"""
+    cache_dir = tmp_path / "cache"
+    anthropic = LLMClient(_config(), transport=FakeTransport(_response()), cache_dir=cache_dir)
+    anthropic.complete("问题")
+    transport = FakeTransport(_openai_response())
+    openai = LLMClient(_config(protocol="openai"), transport=transport, cache_dir=cache_dir)
+    completion = openai.complete("问题")
+    assert completion.cached is False  # 未命中 anthropic 写入的旧条目
+    assert transport.call_count == 1  # 真实发起了 openai 请求
+    assert completion.text == "判定结果"
 
 
 # ---- 缓存 ----
@@ -223,14 +379,15 @@ def test_write_failure_warning_has_no_secrets(
 
 
 def test_cache_key_covers_all_components() -> None:
-    base = llm._cache_key("glm-5.3", None, "prompt", 1024, 0.0, "low")
-    assert base == llm._cache_key("glm-5.3", None, "prompt", 1024, 0.0, "low")
-    assert base != llm._cache_key("glm-5.3", "system", "prompt", 1024, 0.0, "low")
-    assert base != llm._cache_key("glm-5.3", None, "other", 1024, 0.0, "low")
-    assert base != llm._cache_key("glm-5.3", None, "prompt", 2048, 0.0, "low")
-    assert base != llm._cache_key("glm-5.3", None, "prompt", 1024, 0.7, "low")
-    assert base != llm._cache_key("other-model", None, "prompt", 1024, 0.0, "low")
-    assert base != llm._cache_key("glm-5.3", None, "prompt", 1024, 0.0, "high")
+    base = llm._cache_key("glm-5.3", None, "prompt", 1024, 0.0, "low", "anthropic")
+    assert base == llm._cache_key("glm-5.3", None, "prompt", 1024, 0.0, "low", "anthropic")
+    assert base != llm._cache_key("glm-5.3", "system", "prompt", 1024, 0.0, "low", "anthropic")
+    assert base != llm._cache_key("glm-5.3", None, "other", 1024, 0.0, "low", "anthropic")
+    assert base != llm._cache_key("glm-5.3", None, "prompt", 2048, 0.0, "low", "anthropic")
+    assert base != llm._cache_key("glm-5.3", None, "prompt", 1024, 0.7, "low", "anthropic")
+    assert base != llm._cache_key("other-model", None, "prompt", 1024, 0.0, "low", "anthropic")
+    assert base != llm._cache_key("glm-5.3", None, "prompt", 1024, 0.0, "high", "anthropic")
+    assert base != llm._cache_key("glm-5.3", None, "prompt", 1024, 0.0, "low", "openai")
 
 
 def test_any_parameter_change_misses_cache(tmp_path: Path) -> None:
@@ -251,7 +408,7 @@ def test_any_parameter_change_misses_cache(tmp_path: Path) -> None:
 def test_corrupt_cache_entry_is_miss(tmp_path: Path) -> None:
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
-    key = llm._cache_key("glm-5.3", None, "问题", 1024, 0.0, "low")
+    key = llm._cache_key("glm-5.3", None, "问题", 1024, 0.0, "low", "anthropic")
     (cache_dir / f"{key}.json").write_text("{ 不是 JSON", encoding="utf-8")
     transport = FakeTransport(_response())
     completion = LLMClient(_config(), transport=transport, cache_dir=cache_dir).complete("问题")

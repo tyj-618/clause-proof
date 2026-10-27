@@ -13,6 +13,7 @@ from clauseproof.config import LLMConfig, Prices, load_config, prices_for
 _ALL_VARS = (
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
+    "CLAUSEPROOF_PROTOCOL",
     "CLAUSEPROOF_MODEL",
     "CLAUSEPROOF_MAX_TOKENS",
     "CLAUSEPROOF_REASONING_EFFORT",
@@ -67,6 +68,7 @@ def test_dotenv_file_supplies_all_values(tmp_path: Path) -> None:
         tmp_path / ".env",
         "ANTHROPIC_BASE_URL=https://file.test\n"
         "ANTHROPIC_AUTH_TOKEN=file-token\n"
+        "CLAUSEPROOF_PROTOCOL=anthropic\n"
         "CLAUSEPROOF_MODEL=file-model\n"
         "CLAUSEPROOF_MAX_TOKENS=123\n"
         "CLAUSEPROOF_REASONING_EFFORT=high\n"
@@ -83,6 +85,7 @@ def test_dotenv_file_supplies_all_values(tmp_path: Path) -> None:
         temperature=0.5,
         timeout_s=12.5,
         cache_dir=tmp_path / "file-cache",
+        protocol="anthropic",
     )
 
 
@@ -96,6 +99,8 @@ def test_defaults_when_optional_vars_unset(tmp_path: Path, monkeypatch: pytest.M
     assert cfg.temperature == 0.0
     assert cfg.timeout_s == 180.0
     assert cfg.cache_dir == tmp_path / ".cache" / "llm"
+    # T-006：协议默认 openai，与 LLMConfig 字段默认一致（见构造路径一致性测试）
+    assert cfg.protocol == "openai"
 
 
 def test_cache_dir_from_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,6 +114,7 @@ def test_cache_dir_from_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 def test_missing_required_var_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
 ) -> None:
+    monkeypatch.setenv("CLAUSEPROOF_PROTOCOL", "anthropic")
     _set_required(monkeypatch)
     monkeypatch.delenv(missing)
     with pytest.raises(RuntimeError) as excinfo:
@@ -117,6 +123,25 @@ def test_missing_required_var_raises(
     assert missing in message
     assert "环境变量" in message
     assert ".env.example" in message
+
+
+def test_openai_protocol_base_url_optional(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """openai 协议的 URL 由代码内置（llm 模块常量），缺 ANTHROPIC_BASE_URL 不报错。"""
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-fake-token")
+    cfg = load_config(tmp_path / "absent.env")
+    assert cfg.protocol == "openai"
+    assert cfg.base_url == ""
+
+
+def test_openai_protocol_auth_token_still_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://fake.test")
+    with pytest.raises(RuntimeError) as excinfo:
+        load_config(tmp_path / "absent.env")
+    message = str(excinfo.value)
+    assert "ANTHROPIC_AUTH_TOKEN" in message
+    assert "ANTHROPIC_BASE_URL" not in message  # openai 下 base_url 不在必填清单
 
 
 def test_missing_required_names_only_missing_var(
@@ -213,15 +238,72 @@ def test_nonpositive_timeout_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         load_config(tmp_path / "absent.env")
 
 
-def test_invalid_reasoning_effort_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_anthropic_reasoning_effort_medium_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """anthropic 协议保留原三档校验（该端点忽略此字段，但发送无害）。"""
+    monkeypatch.setenv("CLAUSEPROOF_PROTOCOL", "anthropic")
     _set_required(monkeypatch)
     monkeypatch.setenv("CLAUSEPROOF_REASONING_EFFORT", "medium")
     with pytest.raises(RuntimeError) as excinfo:
         load_config(tmp_path / "absent.env")
     message = str(excinfo.value)
     assert "CLAUSEPROOF_REASONING_EFFORT" in message
+    assert "protocol=anthropic" in message
     for allowed in ("low", "high", "max"):
         assert allowed in message
+
+
+def test_anthropic_reasoning_effort_openai_only_value_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """openai 专属档位（如 none）在 anthropic 协议下非法。"""
+    monkeypatch.setenv("CLAUSEPROOF_PROTOCOL", "anthropic")
+    _set_required(monkeypatch)
+    monkeypatch.setenv("CLAUSEPROOF_REASONING_EFFORT", "none")
+    with pytest.raises(RuntimeError, match="protocol=anthropic"):
+        load_config(tmp_path / "absent.env")
+
+
+def test_openai_reasoning_effort_seven_values_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """openai 协议合法档位共 7 个，包括 anthropic 下非法的 medium / none。"""
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-fake-token")
+    for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+        monkeypatch.setenv("CLAUSEPROOF_REASONING_EFFORT", effort)
+        assert load_config(tmp_path / "absent.env").reasoning_effort == effort
+
+
+def test_openai_reasoning_effort_invalid_value_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-fake-token")
+    monkeypatch.setenv("CLAUSEPROOF_REASONING_EFFORT", "banana")
+    with pytest.raises(RuntimeError) as excinfo:
+        load_config(tmp_path / "absent.env")
+    message = str(excinfo.value)
+    assert "CLAUSEPROOF_REASONING_EFFORT" in message
+    assert "protocol=openai" in message
+    for allowed in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+        assert allowed in message
+
+
+def test_protocol_from_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required(monkeypatch)
+    monkeypatch.setenv("CLAUSEPROOF_PROTOCOL", "anthropic")
+    assert load_config(tmp_path / "absent.env").protocol == "anthropic"
+
+
+def test_unknown_protocol_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required(monkeypatch)
+    monkeypatch.setenv("CLAUSEPROOF_PROTOCOL", "grpc")
+    with pytest.raises(RuntimeError) as excinfo:
+        load_config(tmp_path / "absent.env")
+    message = str(excinfo.value)
+    assert "CLAUSEPROOF_PROTOCOL" in message
+    assert "anthropic/openai" in message
+    assert "grpc" in message
 
 
 def test_prices_for_glm_53() -> None:
@@ -250,9 +332,29 @@ def test_llm_config_is_frozen(tmp_path: Path) -> None:
         temperature=0.0,
         timeout_s=1.0,
         cache_dir=tmp_path / "cache",
+        protocol="openai",
     )
     with pytest.raises(FrozenInstanceError):
         cfg.model = "other"
+
+
+def test_protocol_default_consistent_across_construction_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """直接构造与 load_config 的默认协议一致：行为不得取决于构造路径。"""
+    _set_required(monkeypatch)
+    direct = LLMConfig(
+        base_url="https://fake.test",
+        api_key="sk-fake",
+        model="glm-5.3",
+        max_tokens=8,
+        reasoning_effort="low",
+        temperature=0.0,
+        timeout_s=1.0,
+        cache_dir=tmp_path / "cache",
+    )
+    assert direct.protocol == "openai"
+    assert load_config(tmp_path / "absent.env").protocol == "openai"
 
 
 def test_auth_token_never_echoed_in_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

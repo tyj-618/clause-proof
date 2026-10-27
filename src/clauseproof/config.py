@@ -11,14 +11,26 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-# 变量名与默认值来自 tasks/T-002.md「配置项」表；任何来源的空字符串都视为未设置。
-_REQUIRED_VARS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")
+# 变量名与默认值来自 tasks/T-002.md「配置项」表（T-006 增补 CLAUSEPROOF_PROTOCOL）；
+# 任何来源的空字符串都视为未设置。
 _DEFAULT_MODEL = "glm-5.3"
 _DEFAULT_MAX_TOKENS = 8192
 _DEFAULT_REASONING_EFFORT = "low"
-_REASONING_EFFORTS = ("low", "high", "max")
 _DEFAULT_TEMPERATURE = 0.0
 _DEFAULT_TIMEOUT_S = 180.0
+_DEFAULT_PROTOCOL = "openai"
+_PROTOCOLS = ("anthropic", "openai")
+# 合法档位随协议而定：Anthropic 兼容端点实测忽略该字段（0003 §10），取三档仅为保守；
+# OpenAI 兼容端点会校验非法值返回 400，合法取值共 7 档（tasks/T-006 实测）
+_ANTHROPIC_REASONING_EFFORTS = ("low", "high", "max")
+_OPENAI_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def _required_vars(protocol: str) -> tuple[str, ...]:
+    """必填环境变量按协议而定：openai 的 URL 由 llm 模块内置常量决定，base_url 可缺省。"""
+    if protocol == "openai":
+        return ("ANTHROPIC_AUTH_TOKEN",)
+    return ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,12 +41,16 @@ class LLMConfig:
     api_key: str
     model: str
     max_tokens: int
-    # "low" | "high" | "max"；保留发送：无害。
-    # 实测该字段在 Anthropic 兼容端点被网关忽略，实际使用默认档（max）
+    # 推理档位，合法取值随 protocol 而定（见 load_config）：
+    # anthropic 端点实测忽略此字段；openai 端点会校验，非法值返回 400
     reasoning_effort: str
     temperature: float
     timeout_s: float
     cache_dir: Path
+    # "anthropic" | "openai"，决定 LLMClient 默认选择哪个 Backend。
+    # load_config 由 CLAUSEPROOF_PROTOCOL 决定；字段默认值与其统一为 "openai"，
+    # 行为不取决于构造路径。测试里的直接构造按需显式传值，不依赖默认值
+    protocol: str = "openai"
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +143,14 @@ def load_config(env_file: Path | None = None) -> LLMConfig:
             return env_value
         return from_file.get(name, "")
 
-    missing = [name for name in _REQUIRED_VARS if not value_of(name)]
+    protocol = value_of("CLAUSEPROOF_PROTOCOL") or _DEFAULT_PROTOCOL
+    if protocol not in _PROTOCOLS:
+        raise RuntimeError(
+            "config: CLAUSEPROOF_PROTOCOL 违反 取值范围，"
+            f"期望 {'/'.join(_PROTOCOLS)}，实际 {protocol!r}"
+        )
+
+    missing = [name for name in _required_vars(protocol) if not value_of(name)]
     if missing:
         raise RuntimeError(
             "config: "
@@ -137,10 +160,13 @@ def load_config(env_file: Path | None = None) -> LLMConfig:
         )
 
     reasoning_effort = value_of("CLAUSEPROOF_REASONING_EFFORT") or _DEFAULT_REASONING_EFFORT
-    if reasoning_effort not in _REASONING_EFFORTS:
+    allowed_efforts = (
+        _OPENAI_REASONING_EFFORTS if protocol == "openai" else _ANTHROPIC_REASONING_EFFORTS
+    )
+    if reasoning_effort not in allowed_efforts:
         raise RuntimeError(
-            "config: CLAUSEPROOF_REASONING_EFFORT 违反 取值范围，"
-            f"期望 {'/'.join(_REASONING_EFFORTS)}，实际 {reasoning_effort!r}"
+            "config: CLAUSEPROOF_REASONING_EFFORT 违反 取值范围"
+            f"（protocol={protocol}），期望 {'/'.join(allowed_efforts)}，实际 {reasoning_effort!r}"
         )
     raw_max_tokens = value_of("CLAUSEPROOF_MAX_TOKENS")
     max_tokens = _to_int("CLAUSEPROOF_MAX_TOKENS", raw_max_tokens, default=_DEFAULT_MAX_TOKENS)
@@ -168,4 +194,5 @@ def load_config(env_file: Path | None = None) -> LLMConfig:
         temperature=temperature,
         timeout_s=timeout_s,
         cache_dir=cache_dir,
+        protocol=protocol,
     )
