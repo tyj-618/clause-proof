@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 状态 | Draft |
-| 版本 | 0.3 |
+| 版本 | 0.5 |
 | 上游 | [设计 0001](0001-architecture.md)、[设计 0002](0002-data-model.md) |
 
 ## 1. 通用约定
@@ -233,10 +233,11 @@ class LLMConfig:
     api_key: str
     model: str
     max_tokens: int
-    reasoning_effort: str      # "low" | "high" | "max"
+    reasoning_effort: str      # 合法取值随 protocol 而定，见下
     temperature: float
     timeout_s: float
     cache_dir: Path
+    protocol: str              # "anthropic" | "openai"，由 CLAUSEPROOF_PROTOCOL 决定
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,12 +275,35 @@ class HttpxTransport:
     def post(self, url: str, payload: dict, headers: dict[str, str]) -> dict: ...
 
 
+@dataclass(frozen=True, slots=True)
+class BackendResult:
+    text: str
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
+    stop_reason: str | None
+
+
+class Backend(Protocol):
+    def request(self, config: LLMConfig, prompt: str, system: str | None,
+                max_tokens: int) -> tuple[str, dict, dict[str, str]]:
+        """返回 (url, payload, headers)。"""
+
+    def parse(self, response: dict) -> BackendResult:
+        """把端点响应解析为统一结构。"""
+
+
+class AnthropicBackend: ...
+class OpenAIBackend: ...
+
+
 class LLMClient:
     def __init__(
         self,
         config: LLMConfig,
         *,
         transport: Transport | None = None,
+        backend: Backend | None = None,   # 缺省按 config.protocol 选择
         cache_dir: Path | None = None,
         max_retries: int = 3,
     ) -> None: ...
@@ -300,7 +324,15 @@ class LLMClient:
   - 缓存目录来自运行时配置（`LLMConfig.cache_dir`），默认为 `<项目根>/.cache/llm`；不存在「默认关闭缓存」的路径
   - 重试耗尽抛 `RuntimeError`；4xx（非 429）不重试
   - 成本按「新输入 / 缓存命中 / 输出」三段计算，异常与日志不含 `api_key`
-  - `reasoning_effort` 经本端点发送时不生效：实测发送非法值 `"banana"` 仍返回 200，说明网关不校验该字段，实际推理档位为服务端默认值（max）。因此成本以响应 `usage` 实测为准，不按档位估算
+  - 缓存键包含 `protocol`，不含 backend 类型与 `base_url` / `api_key`（后三者不改变
+    同一协议下同一模型的应答语义）
+- **协议与端点（T-006）**
+  - `protocol` 由 `CLAUSEPROOF_PROTOCOL` 决定，默认 `"openai"`；未知值在 `load_config` 抛 `RuntimeError`，`LLMClient` 构造期兜底校验
+  - **anthropic**：URL = `base_url + /v1/messages`；头含 `Authorization: Bearer`、`anthropic-version`、`content-type`；system 为顶层 `system` 字段；`reasoning_effort` 合法值 `{low, high, max}`，实测被该端点忽略（发送无害），实际档位为服务端默认（max）。因此成本以响应 `usage` 实测为准，不按档位估算
+  - **openai**：URL 由代码内置 `https://open.bigmodel.cn/api/paas/v4/chat/completions`，`ANTHROPIC_BASE_URL` 可缺省；头含 `Authorization: Bearer`、`content-type`（无 `anthropic-version`）；system 进 `messages` 首条；`reasoning_effort` 合法值 `{none, minimal, low, medium, high, xhigh, max}`，该端点会校验，非法值返回 400
+  - 两种协议下 `ANTHROPIC_AUTH_TOKEN` 均为必填
+  - **响应归一化**：`OpenAIBackend.parse` 把 `finish_reason == "length"` 归一化为 `"max_tokens"`（上层空正文保护依赖此值）；`content` 为 null 按空串处理；`usage.prompt_tokens_details.cached_tokens` 缺失按 0 处理。字段映射详见 tasks/T-006.md
+  - 缓存键包含 protocol；切换协议即视为不同请求，不会跨协议命中缓存
 
 > 网络传输遵循 httpx 默认的代理环境变量行为；代理配置错误会表现为构造期失败，而非请求期失败。
 
@@ -322,3 +354,5 @@ class LLMClient:
 | 0.1 | 2026-10-21 | 初稿 |
 | 0.2 | 2026-10-26 | `judge` 后置条件补充 `parse_ok` 语义（见设计 0004 §3） |
 | 0.3 | 2026-10-26 | 补 llm 模块接口与 `cache_written` 语义 |
+| 0.4 | 2026-10-27 | §10 增加 Backend 抽象（Anthropic / OpenAI）与 `LLMConfig.protocol`，端点与归一化规则见「协议与端点」（T-006） |
+| 0.5 | 2026-10-27 | 缓存键加入 protocol（跨协议不得命中旧缓存）；`LLMConfig.protocol` 默认值与 load_config 统一为 "openai" |
