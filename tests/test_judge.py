@@ -89,6 +89,9 @@ def _config(**overrides: object) -> LLMConfig:
         timeout_s=5.0,
         # 每次全新目录：不显式覆盖 cache_dir 的用例不会命中彼此或上一次运行的缓存
         cache_dir=Path(tempfile.mkdtemp(prefix="clauseproof-judge-cache-")),
+        # 本文件的 FakeTransport 响应是 Anthropic 形状（content 块 + stop_reason），
+        # 显式指定协议，不依赖 LLMConfig 的默认值
+        protocol="anthropic",
     )
     values.update(overrides)
     return LLMConfig(**values)

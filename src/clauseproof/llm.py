@@ -1,9 +1,10 @@
-"""模型调用层：可注入传输、磁盘缓存、重试、计量与成本。
+"""模型调用层：可替换协议后端、可注入传输、磁盘缓存、重试、计量与成本。
 
-契约见 tasks/T-002.md。全项目只有 HttpxTransport.post 一处发起网络请求（见 ADR-0001，
-不依赖官方 SDK，请求体完全可控）。错误信息遵循 docs/design/0004-error-semantics.md §8，
-LLMClient 对外只抛 RuntimeError。日志与异常只出现 prompt_hash，不出现 prompt 正文与
-api_key。
+契约见 tasks/T-002.md 与 tasks/T-006.md（Backend 抽象）。请求构造与响应解析按协议拆分为
+AnthropicBackend / OpenAIBackend，由 LLMConfig.protocol 选择；全项目只有 HttpxTransport.post
+一处发起网络请求（见 ADR-0001，不依赖官方 SDK，请求体完全可控）。错误信息遵循
+docs/design/0004-error-semantics.md §8，LLMClient 对外只抛 RuntimeError。日志与异常只出现
+prompt_hash，不出现 prompt 正文与 api_key。
 """
 
 from __future__ import annotations
@@ -24,6 +25,10 @@ from clauseproof.config import LLMConfig, prices_for
 logger = logging.getLogger(__name__)
 
 _ANTHROPIC_VERSION = "2023-06-01"
+# 智谱 OpenAI 兼容端点（chat/completions）。URL 由代码内置而非环境变量：
+# 切换协议只改 CLAUSEPROOF_PROTOCOL 一项，不要求为 openai 配置 base_url。
+# 出处 https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3，查询日期 2026-10-26
+_OPENAI_CHAT_COMPLETIONS_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 _RETRY_BACKOFF_BASE_S = 0.5
 _CACHE_SCHEMA_VERSION = 1
 
@@ -78,6 +83,128 @@ class HttpxTransport:
             raise RuntimeError("llm: 模型端点返回了非 JSON 的 2xx 响应") from exc
 
 
+@dataclass(frozen=True, slots=True)
+class BackendResult:
+    """端点响应解析后的统一结构，协议差异在此归一（字段映射见 tasks/T-006.md）。"""
+
+    text: str
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
+    stop_reason: str | None
+
+
+@runtime_checkable
+class Backend(Protocol):
+    """协议后端：构造请求 + 解析响应。具体端点的差异收敛在这两个方法里。"""
+
+    def request(
+        self, config: LLMConfig, prompt: str, system: str | None, max_tokens: int
+    ) -> tuple[str, dict, dict[str, str]]:
+        """返回 (url, payload, headers)。"""
+
+    def parse(self, response: dict) -> BackendResult:
+        """把端点响应解析为统一结构。"""
+
+
+class AnthropicBackend:
+    """Anthropic Messages 协议（智谱兼容端点）：顶层 system 字段、content 块响应。"""
+
+    def request(
+        self, config: LLMConfig, prompt: str, system: str | None, max_tokens: int
+    ) -> tuple[str, dict, dict[str, str]]:
+        payload: dict = {
+            "model": config.model,
+            "max_tokens": max_tokens,
+            "temperature": config.temperature,
+            # GLM-5.3 思考强制开启，reasoning_effort 为与 thinking 平级的顶层字段。
+            # 出处 https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3，查询日期 2026-10-26
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": config.reasoning_effort,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if system is not None:
+            payload["system"] = system
+        url = config.base_url.rstrip("/") + "/v1/messages"
+        headers = {
+            "Authorization": f"Bearer {config.api_key}",
+            "anthropic-version": _ANTHROPIC_VERSION,
+            "content-type": "application/json",
+        }
+        return url, payload, headers
+
+    def parse(self, response: dict) -> BackendResult:
+        usage = response.get("usage") or {}
+        return BackendResult(
+            text=self._extract_text(response),
+            input_tokens=int(usage.get("input_tokens", 0)),
+            output_tokens=int(usage.get("output_tokens", 0)),
+            cached_input_tokens=int(usage.get("cache_read_input_tokens", 0)),
+            stop_reason=response.get("stop_reason"),
+        )
+
+    @staticmethod
+    def _extract_text(response: dict) -> str:
+        """拼接全部 text 块；thinking 等其他类型块不进入正文。"""
+        blocks = response.get("content") or []
+        return "".join(block.get("text", "") for block in blocks if block.get("type") == "text")
+
+
+class OpenAIBackend:
+    """OpenAI Chat Completions 协议（智谱兼容端点）：system 进 messages，URL 内置。"""
+
+    def request(
+        self, config: LLMConfig, prompt: str, system: str | None, max_tokens: int
+    ) -> tuple[str, dict, dict[str, str]]:
+        messages: list[dict] = []
+        if system is not None:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        payload = {
+            "model": config.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": config.temperature,
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": config.reasoning_effort,
+        }
+        headers = {
+            "Authorization": f"Bearer {config.api_key}",
+            "content-type": "application/json",
+        }
+        return _OPENAI_CHAT_COMPLETIONS_URL, payload, headers
+
+    def parse(self, response: dict) -> BackendResult:
+        choices = response.get("choices") or []
+        first = choices[0] if choices else {}
+        message = first.get("message") or {}
+        # content 可能为 null（思考耗尽预算时的实测形态），按空串处理
+        finish_reason = first.get("finish_reason")
+        # 上层空正文保护按 stop_reason == "max_tokens" 判断，OpenAI 用 "length" 表同一件事，
+        # 不归一化会把截断当成正常结束（tasks/T-006 字段映射的最后一条要求）
+        stop_reason = "max_tokens" if finish_reason == "length" else finish_reason
+        usage = response.get("usage") or {}
+        details = usage.get("prompt_tokens_details") or {}
+        return BackendResult(
+            text=message.get("content") or "",
+            input_tokens=int(usage.get("prompt_tokens", 0)),
+            output_tokens=int(usage.get("completion_tokens", 0)),
+            cached_input_tokens=int(details.get("cached_tokens", 0)),
+            stop_reason=stop_reason,
+        )
+
+
+def _default_backend(protocol: str) -> Backend:
+    """按 config.protocol 选择默认后端。load_config 已在入口校验，这里是直接构造时的防线。"""
+    if protocol == "openai":
+        return OpenAIBackend()
+    if protocol == "anthropic":
+        return AnthropicBackend()
+    raise RuntimeError(
+        f"llm: config.protocol 违反 取值范围，期望 anthropic/openai，实际 {protocol!r}"
+    )
+
+
 def _cache_key(
     model: str,
     system: str | None,
@@ -85,12 +212,16 @@ def _cache_key(
     max_tokens: int,
     temperature: float,
     reasoning_effort: str,
+    protocol: str,
 ) -> str:
     """缓存键：对请求身份的规范化 JSON 取 sha256（64 位十六进制）。
 
     任务书要求包含 model、system、prompt、max_tokens、temperature；
     另加 reasoning_effort（同样影响输出）与版本号 v（请求格式变更时使旧缓存失效）。
     base_url 与 api_key 刻意不进键：它们不改变同一模型的应答语义。
+    protocol 进键：协议改变请求形态与响应分布，model + 参数并不唯一确定请求，
+    切换协议不得命中另一端点生成的旧缓存（否则 token 与成本统计失真）。
+    加入该字段后旧缓存条目因哈希变化不再命中，属预期行为，无需清理。
     """
     canonical = json.dumps(
         {
@@ -101,6 +232,7 @@ def _cache_key(
             "max_tokens": max_tokens,
             "temperature": temperature,
             "reasoning_effort": reasoning_effort,
+            "protocol": protocol,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -113,12 +245,6 @@ def _elapsed_ms(started: float) -> float:
     return (time.monotonic() - started) * 1000.0
 
 
-def _extract_text(response: dict) -> str:
-    """拼接全部 text 块；thinking 等其他类型块不进入正文。"""
-    blocks = response.get("content") or []
-    return "".join(block.get("text", "") for block in blocks if block.get("type") == "text")
-
-
 def _status_detail(exc: httpx.HTTPStatusError) -> str:
     """从 HTTPStatusError 提取安全的原因描述（不含请求头，也就不含 api_key）。"""
     body = exc.response.text.strip()
@@ -129,18 +255,21 @@ def _status_detail(exc: httpx.HTTPStatusError) -> str:
 
 
 class LLMClient:
-    """模型客户端：缓存 → 请求 → 重试 → 计量 → 成本。"""
+    """模型客户端：缓存 → 请求（backend 构造）→ 重试 → 解析（backend 归一）→ 计量 → 成本。"""
 
     def __init__(
         self,
         config: LLMConfig,
         *,
         transport: Transport | None = None,
+        backend: Backend | None = None,
         cache_dir: Path | None = None,
         max_retries: int = 3,
     ) -> None:
         self._config = config
         self._transport = transport if transport is not None else HttpxTransport(config.timeout_s)
+        # backend 形参用于注入（测试或切换实验）；不传则按 config.protocol 选择默认后端
+        self._backend = backend if backend is not None else _default_backend(config.protocol)
         # cache_dir 形参仅用于覆盖配置（测试注入）；不传则用 config.cache_dir
         self._cache_dir = cache_dir if cache_dir is not None else config.cache_dir
         self._max_retries = max_retries
@@ -165,6 +294,7 @@ class LLMClient:
             effective_max_tokens,
             self._config.temperature,
             self._config.reasoning_effort,
+            self._config.protocol,
         )
         hit = self._cache_read(key)
         if hit is not None:
@@ -173,29 +303,28 @@ class LLMClient:
                 hit, cached=True, cost_cny=0.0, latency_ms=_elapsed_ms(started), cache_written=True
             )
 
-        payload = self._build_payload(prompt, system, effective_max_tokens)
-        response, attempts = self._post_with_retry(payload, prompt_hash)
-        text = _extract_text(response)
-        stop_reason = response.get("stop_reason")
-        usage = response.get("usage") or {}
-        input_tokens = int(usage.get("input_tokens", 0))
-        output_tokens = int(usage.get("output_tokens", 0))
-        cached_input_tokens = int(usage.get("cache_read_input_tokens", 0))
-        if stop_reason == "max_tokens" and not text:
+        url, payload, headers = self._backend.request(
+            self._config, prompt, system, effective_max_tokens
+        )
+        response, attempts = self._post_with_retry(url, payload, headers, prompt_hash)
+        result = self._backend.parse(response)
+        if result.stop_reason == "max_tokens" and not result.text:
             raise RuntimeError(
                 "llm: stop_reason=max_tokens 且正文为空，模型可能在思考阶段耗尽预算，"
                 f"请提高 max_tokens（prompt_hash={prompt_hash}）"
             )
         completion = Completion(
-            text=text,
+            text=result.text,
             model=self._config.model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cached_input_tokens=cached_input_tokens,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cached_input_tokens=result.cached_input_tokens,
             latency_ms=_elapsed_ms(started),
             cached=False,
-            stop_reason=stop_reason,
-            cost_cny=self._cost_cny(input_tokens, output_tokens, cached_input_tokens),
+            stop_reason=result.stop_reason,
+            cost_cny=self._cost_cny(
+                result.input_tokens, result.output_tokens, result.cached_input_tokens
+            ),
             cache_written=False,
         )
         completion = replace(completion, cache_written=self._cache_write(key, completion))
@@ -205,41 +334,22 @@ class LLMClient:
             "llm: 调用完成，尝试次数=%d，input=%d，output=%d，cached_input=%d，"
             "cost_cny=%.6f，latency_ms=%.1f，prompt_hash=%s",
             attempts,
-            input_tokens,
-            output_tokens,
-            cached_input_tokens,
+            result.input_tokens,
+            result.output_tokens,
+            result.cached_input_tokens,
             completion.cost_cny,
             completion.latency_ms,
             prompt_hash,
         )
         return completion
 
-    def _build_payload(self, prompt: str, system: str | None, max_tokens: int) -> dict:
-        payload: dict = {
-            "model": self._config.model,
-            "max_tokens": max_tokens,
-            "temperature": self._config.temperature,
-            # GLM-5.3 思考强制开启，reasoning_effort 为与 thinking 平级的顶层字段。
-            # 出处 https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3，查询日期 2026-10-26
-            "thinking": {"type": "enabled"},
-            "reasoning_effort": self._config.reasoning_effort,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        if system is not None:
-            payload["system"] = system
-        return payload
-
-    def _post_with_retry(self, payload: dict, prompt_hash: str) -> tuple[dict, int]:
+    def _post_with_retry(
+        self, url: str, payload: dict, headers: dict[str, str], prompt_hash: str
+    ) -> tuple[dict, int]:
         """发请求；429 与 5xx 按指数退避重试，最多 max_retries 次。
 
         返回 (响应, 实际尝试次数)。4xx（除 429）与重试耗尽都抛 RuntimeError。
         """
-        url = self._config.base_url.rstrip("/") + "/v1/messages"
-        headers = {
-            "Authorization": f"Bearer {self._config.api_key}",
-            "anthropic-version": _ANTHROPIC_VERSION,
-            "content-type": "application/json",
-        }
         attempts = 0
         while True:
             attempts += 1
