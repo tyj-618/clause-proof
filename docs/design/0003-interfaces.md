@@ -177,14 +177,15 @@ def load_gold_with_stats(*, split: str, n_contracts: int, seed: int) -> tuple[di
 ## 8. storage
 
 ```python
-def append(path: Path, record: Record) -> None
-def read(path: Path) -> Iterator[Record]
+def append_record(path: Path, record: Record) -> None
+def read_records(path: Path) -> Iterator[Record]
 def write_meta(path: Path, meta: RunMeta) -> None
 def read_meta(path: Path) -> RunMeta
 ```
 
-- **后置**：`read(append(r))` 得到的对象与 `r` 等值（浮点按 0002 §8 的取整规则）
-- `append` 必须单行写入并立即 flush，保证中断时已写内容完整
+- **后置**：`read_records(append_record(r))` 得到的对象与 `r` 等值（浮点按 0002 §8 的取整规则）
+- `append_record` 必须单行写入并立即 flush，保证中断时已写内容完整
+- 函数名以本文件为准；实现与文档不一致时，以文档为准并修正实现
 
 ## 9. calibration
 
@@ -312,7 +313,7 @@ class LLMClient:
 1. **假 Judge 端到端**：用返回固定结果的 `FakeJudge` 驱动 `runner`，产出合法 JSONL，全程不触碰真实模型
 2. **每条不变式一个测试**：0002 §7 的每一行对应至少一个断言
 3. **每个后置条件一个测试**：尤其是 `select_thresholds` 的确定性与 `dataset` 的两次调用一致性
-4. **往返一致**：`storage.append` → `read` 等值
+4. **往返一致**：`storage.append_record` → `read_records` 等值
 
 ## 12. 修订记录
 
