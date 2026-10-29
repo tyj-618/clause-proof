@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 状态 | Draft |
-| 版本 | 0.3 |
+| 版本 | 0.4 |
 | 上游 | [PRD-0001](../prd/0001-contract-clause-review.md)、[设计 0001](0001-architecture.md) |
 
 ## 1. 约束
@@ -76,6 +76,7 @@ class Span:
     end: int | None
     valid: bool
     occurrences: int     # 该 quote 在原文中出现的次数
+    matched: str         # "exact" | "normalized" | "none"；valid == (matched != "none")
 ```
 
 ## 4. 落盘单元
@@ -157,6 +158,8 @@ class RunMeta:
 | `Span` | `valid` → `start`、`end` 均非 None 且 `0 ≤ start < end` |
 | `Span` | `not valid` → `start is None and end is None` |
 | `Span` | `occurrences ≥ 0`；`valid` → `occurrences ≥ 1` |
+| `Span` | `matched ∈ {"exact", "normalized", "none"}` |
+| `Span` | `valid == (matched != "none")`：精确/归一化命中皆有效，未命中无效 |
 | `Record` | `status == OK` → `judgment` 与 `route` 均非 None |
 | `Record` | `status != OK` → `judgment is None and spans == () and route is None` |
 | `Record` | `input_tokens ≥ 0`、`output_tokens ≥ 0`、`latency_ms ≥ 0` |
@@ -203,3 +206,4 @@ class RunMeta:
 |---|---|---|
 | 0.1 | 2026-10-21 | 初稿 |
 | 0.2 | 2026-10-26 | `Judgment` 增加 `parse_ok`，区分解析失败与模型真不确定（见设计 0004 §3） |
+| 0.4 | 2026-10-29 | `Span` 增加 `matched`（locate 三层匹配结果，T-011a），不变式 `valid == (matched != "none")`；旧 JSONL 反序列化时缺失该字段按 `valid` 推断（"exact" / "none"） |

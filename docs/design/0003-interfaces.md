@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 状态 | Draft |
-| 版本 | 0.8 |
+| 版本 | 0.9 |
 | 上游 | [设计 0001](0001-architecture.md)、[设计 0002](0002-data-model.md) |
 
 ## 1. 通用约定
@@ -25,12 +25,27 @@ def locate(quotes: Sequence[str], text: str) -> tuple[Span, ...]
 - **前置**：`text` 非空
 - **后置**
   - `len(返回值) == len(quotes)`，且顺序一一对应
-  - 空字符串 quote → `valid=False`、`occurrences=0`，不抛错
-  - `valid` 为真当且仅当 `occurrences ≥ 1`
-  - `valid` 时 `start = text.find(quote)`、`end = start + len(quote)`
-  - `occurrences = text.count(quote)`
+  - 空字符串 quote → `valid=False`、`occurrences=0`、`matched="none"`，不抛错
+  - `valid` 为真当且仅当 `matched != "none"`，且当且仅当 `occurrences ≥ 1`
+  - **三层匹配**（依次降级，逐个 quote 独立判定）：
+    1. **精确匹配**：`occurrences = text.count(quote)` ≥ 1 时取首次出现为区间，
+       `start = text.find(quote)`、`end = start + len(quote)`，`matched="exact"`
+    2. **空白归一化匹配**（仅当第 1 层落空）：把 `text` 与 `quote` 的空白 run
+       折叠为单个空格、首尾空白丢弃（与 `" ".join(s.split())` 等价）；在归一化
+       文本上计数与首次定位，`occurrences` 按归一化文本计数；区间经归一化文本
+       的 `pos[]` 索引（归一化第 i 个字符 → 原文下标）映射回原文，
+       `matched="normalized"`
+    3. **不可定位**：`valid=False`、`occurrences=0`、`matched="none"`
+  - **核心不变量**（第 2 层）：`normalize(text[start:end]) == normalize(quote)`，
+    且区间包含原文中的连续空白（端点落在内容字符上，不剥掉中间空白）
+  - 归一化文本与 `pos[]` 在首次需要第 2 层时才构建，一次 `locate` 调用内
+    最多构建一次
+  - 非空但全空白的 quote：第 1 层落空且归一化后为空串 → 按第 3 层处理
 
 > 空串不抛错是刻意容忍：模型可能输出空引用，这属于可统计的失败，不应中断运行。
+>
+> 第 2 层的动机：CUAD 原文含连续空格，模型复制引用时常把空白归一化，
+> 精确匹配会把这些真实引用误判为不可定位（M1 基线 223 条引用中 35 条仅差空白）。
 
 ## 3. route
 
@@ -109,6 +124,7 @@ class ClauseMetrics:
     citation_iou: float | None      # 全部 gold span 的平均最大 IoU；无 gold span 时 None
     citation_contained: float | None
     citation_valid_rate: float | None
+    citation_exact_rate: float | None   # matched=="exact" 的 span / 全部 span；无 span 时 None
     ece: float | None
 
 
@@ -161,7 +177,9 @@ def compute(
   - 引用指标只用 `span.valid == True` 的预测区间；`citation_iou` 对该类别每个 gold span
     取与全部有效预测区间的最大 IoU 后求平均（未命中记 0），`citation_contained`
     为有效预测区间完全落在某 gold span 内的比例，两者无 gold span 时为 None；
-    `citation_valid_rate` 分母为该类别全部 span 数（含 invalid），无 span 时为 None
+    `citation_valid_rate` 分母为该类别全部 span 数（含 invalid），无 span 时为 None；
+    `citation_exact_rate` = `matched=="exact"` 的 span 数 / 全部 span 数（含 invalid），
+    无 span 时为 None，用于观察第 2 层空白归一化匹配的占比
   - `iou_threshold` 本期不参与主指标计算，仅透传到 `Report` 备后续诊断口径使用
   - `Report.ece` 为全局校准误差：pairs 为全部 `n_decided` 条记录的
     (confidence, 是否判对)，跨条款类别聚合后按 §9 计算
@@ -430,3 +448,4 @@ class LLMClient:
 | 0.6 | 2026-10-27 | §4 Report/ClauseMetrics 扩展 T-007 全部字段并落定口径（成本由 token 重算、缓存命中记 0；p95 仅 OK 记录；split 由调用方传入）；§9 细化等频切分与桶合并规则 |
 | 0.7 | 2026-10-27 | §9 ECE 在非空桶数 <2 时返回 None（单桶不构成校准误差）；§4 Report 新增全局 `ece`，对外报告的校准指标以全局口径为准 |
 | 0.8 | 2026-10-29 | §3 增补阈值与评估集分离约束：`select_thresholds` 只应在开发集上调用（T-009） |
+| 0.9 | 2026-10-29 | §2 `locate` 三层匹配（精确 → 空白归一化 → 不可定位）与 `pos[]` 位置映射、核心不变量、懒构建约束；§4 `ClauseMetrics` 增加 `citation_exact_rate`（T-011a） |
