@@ -1,0 +1,1 @@
+{"run_id":"m1-baseline-dev","commit":"3292b0056f6f0824997ebb975e747d6b5555cd85","model":"glm-5.3","config_digest":"884c502786fc","seed":42,"split":"dev","n_contracts":50,"strategy":"length_stratified","started_at":"2026-10-29T05:20:47Z","n_queries":300}
