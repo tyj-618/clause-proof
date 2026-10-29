@@ -56,8 +56,10 @@ _UNCERTAIN_JUDGMENT = Judgment(
     parse_ok=True,
 )
 
-_VALID_SPAN = Span(quote="甲方应在……", start=0, end=5, valid=True, occurrences=1)
-_INVALID_SPAN = Span(quote="甲方应在……", start=None, end=None, valid=False, occurrences=0)
+_VALID_SPAN = Span(quote="甲方应在……", start=0, end=5, valid=True, occurrences=1, matched="exact")
+_INVALID_SPAN = Span(
+    quote="甲方应在……", start=None, end=None, valid=False, occurrences=0, matched="none"
+)
 
 _OK_RECORD = Record(
     run_id="run-1",
@@ -169,7 +171,14 @@ def test_field_order_matches_contract() -> None:
         "raw_output",
         "parse_ok",
     ]
-    assert [f.name for f in fields(Span)] == ["quote", "start", "end", "valid", "occurrences"]
+    assert [f.name for f in fields(Span)] == [
+        "quote",
+        "start",
+        "end",
+        "valid",
+        "occurrences",
+        "matched",
+    ]
     assert [f.name for f in fields(Record)] == [
         "run_id",
         "query_id",
@@ -330,6 +339,23 @@ def test_span_occurrences_must_be_non_negative() -> None:
 
 def test_span_valid_requires_positive_occurrences() -> None:
     _expect_value_error("Span.occurrences", lambda: replace(_VALID_SPAN, occurrences=0))
+
+
+def test_span_matched_must_be_known_value() -> None:
+    _expect_value_error("Span.matched", lambda: replace(_VALID_SPAN, matched="bogus"))
+
+
+def test_span_matched_must_agree_with_valid() -> None:
+    # valid=True 但 matched="none"：违反 valid == (matched != "none")
+    _expect_value_error("Span.matched", lambda: replace(_VALID_SPAN, matched="none"))
+    # valid=False 但 matched="exact"：同样违反
+    _expect_value_error("Span.matched", lambda: replace(_INVALID_SPAN, matched="exact"))
+
+
+def test_span_normalized_match_with_valid_bounds_is_legal() -> None:
+    span = Span(quote="甲方 应在", start=0, end=6, valid=True, occurrences=1, matched="normalized")
+    assert span.matched == "normalized"
+    assert span.valid is True
 
 
 # ---- Record ----

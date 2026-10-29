@@ -40,8 +40,15 @@ def ok_record() -> Record:
             parse_ok=True,
         ),
         spans=(
-            Span(quote="Alpha Corp", start=0, end=10, valid=True, occurrences=2),
-            Span(quote="not in text", start=None, end=None, valid=False, occurrences=0),
+            Span(quote="Alpha Corp", start=0, end=10, valid=True, occurrences=2, matched="exact"),
+            Span(
+                quote="not in text",
+                start=None,
+                end=None,
+                valid=False,
+                occurrences=0,
+                matched="none",
+            ),
         ),
         route=Route.AUTO_PASS,
         model="glm-5.3",
@@ -231,7 +238,20 @@ def test_field_order_is_fixed(tmp_path: Path) -> None:
         "error_detail",
     ]
     assert list(data["judgment"]) == ["present", "quotes", "confidence", "raw_output", "parse_ok"]
-    assert list(data["spans"][0]) == ["quote", "start", "end", "valid", "occurrences"]
+    assert list(data["spans"][0]) == ["quote", "start", "end", "valid", "occurrences", "matched"]
+
+
+def test_old_jsonl_without_matched_is_readable(tmp_path: Path) -> None:
+    """旧格式（T-011a 之前）的 JSONL 无 matched 字段：按 valid 推断，仍可读。"""
+    path = tmp_path / "run-1.jsonl"
+    append_record(path, ok_record())
+    data = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    for span in data["spans"]:
+        del span["matched"]
+    path.write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
+    (restored,) = read_records(path)
+    assert restored.spans[0].matched == "exact"  # valid=True → exact
+    assert restored.spans[1].matched == "none"  # valid=False → none
 
 
 def test_meta_roundtrip(tmp_path: Path) -> None:

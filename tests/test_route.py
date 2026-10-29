@@ -115,7 +115,7 @@ def _record(
             error_detail="err",
         )
     judgment = judged(present, confidence)
-    spans = tuple(Span(quote, 0, 1, True, 1) for quote in judgment.quotes)
+    spans = tuple(Span(quote, 0, 1, True, 1, "exact") for quote in judgment.quotes)
     return Record(
         run_id="run",
         query_id=query_id,

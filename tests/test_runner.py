@@ -337,8 +337,15 @@ def _ok_record_for(query_id: str):
         status=Status.OK,
         judgment=_FIXED_JUDGMENT,
         spans=(
-            Span(quote="Alpha Corp", start=0, end=10, valid=True, occurrences=1),
-            Span(quote="not in text", start=None, end=None, valid=False, occurrences=0),
+            Span(quote="Alpha Corp", start=0, end=10, valid=True, occurrences=1, matched="exact"),
+            Span(
+                quote="not in text",
+                start=None,
+                end=None,
+                valid=False,
+                occurrences=0,
+                matched="none",
+            ),
         ),
         route=Route.AUTO_PASS,
         model="fake-model",

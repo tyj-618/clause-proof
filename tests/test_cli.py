@@ -228,6 +228,7 @@ def _record_for(query_id: str) -> Record:
                 end=start + len(_GL_QUOTE),
                 valid=True,
                 occurrences=1,
+                matched="exact",
             ),
         ),
         route=Route.AUTO_PASS,

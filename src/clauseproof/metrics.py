@@ -56,6 +56,7 @@ class ClauseMetrics:
     citation_iou: float | None  # 对全部 gold span 的平均最大 IoU；无 gold span 时 None
     citation_contained: float | None  # gold span 被有效预测区间完全覆盖的比例
     citation_valid_rate: float | None  # 有效 span / 全部 span；无 span 时 None
+    citation_exact_rate: float | None  # matched=="exact" 的 span / 全部 span；无 span 时 None
     ece: float | None  # 该类别 n_decided 条 (confidence, 正确) 的期望校准误差
 
 
@@ -206,7 +207,7 @@ def _clause_metrics(
         if not correct and record.judgment.present is Presence.PRESENT
     )
     n_decided = len(decided)
-    citation_iou, citation_contained, valid_rate = _citation_metrics(records, gold)
+    citation_iou, citation_contained, valid_rate, exact_rate = _citation_metrics(records, gold)
     calibration_pairs = [
         (record.judgment.confidence, correct)
         for record, correct in zip(decided, outcomes, strict=True)
@@ -239,6 +240,7 @@ def _clause_metrics(
         citation_iou=citation_iou,
         citation_contained=citation_contained,
         citation_valid_rate=valid_rate,
+        citation_exact_rate=exact_rate,
         ece=expected_calibration_error(bins),
     ), calibration_pairs
 
@@ -246,21 +248,24 @@ def _clause_metrics(
 def _citation_metrics(
     records: Sequence[Record],
     gold: Mapping[str, GoldLabel],
-) -> tuple[float | None, float | None, float | None]:
-    """引用三指标：IoU 均值、完全包含比例、引用有效率。
+) -> tuple[float | None, float | None, float | None, float | None]:
+    """引用四指标：IoU 均值、完全包含比例、引用有效率、精确匹配率。
 
     只用 valid 的预测区间；对每个 gold span 取最大 IoU（无有效预测记 0），
     再对全部 gold span 求平均。无 gold span 时前两者为 None，无任何 span 时
-    有效率为 None。
+    有效率与精确匹配率为 None。精确匹配率 = matched=="exact" 的 span 数 /
+    全部 span 数（含 invalid），用于观察第 2 层空白归一化匹配的占比。
     """
     ious: list[float] = []
     contained: list[bool] = []
     n_spans = 0
     n_valid_spans = 0
+    n_exact_spans = 0
     for record in records:
         valid_ranges = [(span.start, span.end) for span in record.spans if span.valid]
         n_spans += len(record.spans)
         n_valid_spans += len(valid_ranges)
+        n_exact_spans += sum(1 for span in record.spans if span.matched == "exact")
         for gold_span in gold[record.query_id].spans:
             ious.append(
                 max(
@@ -280,6 +285,7 @@ def _citation_metrics(
         sum(ious) / len(ious) if ious else None,
         sum(contained) / len(contained) if contained else None,
         n_valid_spans / n_spans if n_spans else None,
+        n_exact_spans / n_spans if n_spans else None,
     )
 
 

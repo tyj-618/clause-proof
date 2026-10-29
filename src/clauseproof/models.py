@@ -15,6 +15,7 @@ from typing import NoReturn
 _QUERY_ID_SEP = "::"
 _SEED_MAX = 2**63
 _SPLITS = ("dev", "report")
+_MATCHED_VALUES = ("exact", "normalized", "none")
 
 
 def _violation(field: str, constraint: str, expected: object, actual: object) -> NoReturn:
@@ -125,8 +126,23 @@ class Span:
     end: int | None
     valid: bool
     occurrences: int
+    matched: str  # "exact" | "normalized" | "none"；valid == (matched != "none")
 
     def __post_init__(self) -> None:
+        if self.matched not in _MATCHED_VALUES:
+            _violation(
+                "Span.matched",
+                '取值"exact"/"normalized"/"none"',
+                _MATCHED_VALUES,
+                self.matched,
+            )
+        if self.valid != (self.matched != "none"):
+            _violation(
+                "Span.matched",
+                '等于valid（valid == (matched != "none")）',
+                self.valid,
+                self.matched,
+            )
         if self.occurrences < 0:
             _violation("Span.occurrences", ">=0", ">=0", self.occurrences)
         if self.valid:

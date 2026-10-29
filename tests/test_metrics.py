@@ -50,7 +50,8 @@ def make_record(
         )
         if spans is None:
             spans = tuple(
-                Span(quote=q, start=0, end=len(q), valid=True, occurrences=1) for q in quotes
+                Span(quote=q, start=0, end=len(q), valid=True, occurrences=1, matched="exact")
+                for q in quotes
             )
         route = Route.AUTO_PASS
     else:
@@ -255,8 +256,8 @@ def test_citation_uses_only_valid_spans() -> None:
         present=Presence.PRESENT,
         quotes=("valid", "miss"),
         spans=(
-            Span(quote="valid", start=12, end=22, valid=True, occurrences=1),
-            Span(quote="miss", start=None, end=None, valid=False, occurrences=0),
+            Span(quote="valid", start=12, end=22, valid=True, occurrences=1, matched="exact"),
+            Span(quote="miss", start=None, end=None, valid=False, occurrences=0, matched="none"),
         ),
     )
     gold = {"c1::GOVERNING_LAW": make_gold("c1::GOVERNING_LAW", has_answer=True, spans=((10, 20),))}
@@ -272,7 +273,7 @@ def test_citation_contained_when_prediction_inside_gold() -> None:
         "c1::GOVERNING_LAW",
         present=Presence.PRESENT,
         quotes=("valid",),
-        spans=(Span(quote="valid", start=12, end=15, valid=True, occurrences=1),),
+        spans=(Span(quote="valid", start=12, end=15, valid=True, occurrences=1, matched="exact"),),
     )
     gold = {"c1::GOVERNING_LAW": make_gold("c1::GOVERNING_LAW", has_answer=True, spans=((10, 20),))}
     metrics = compute([record], gold, seed=42).by_clause[0]
@@ -285,7 +286,7 @@ def test_citation_averages_over_all_gold_spans() -> None:
         "c1::GOVERNING_LAW",
         present=Presence.PRESENT,
         quotes=("valid",),
-        spans=(Span(quote="valid", start=12, end=15, valid=True, occurrences=1),),
+        spans=(Span(quote="valid", start=12, end=15, valid=True, occurrences=1, matched="exact"),),
     )
     gold = {
         "c1::GOVERNING_LAW": make_gold(
@@ -305,6 +306,38 @@ def test_citation_none_without_gold_spans() -> None:
     assert metrics.citation_iou is None
     assert metrics.citation_contained is None
     assert metrics.citation_valid_rate == 1.0
+
+
+def test_citation_exact_rate_counts_exact_over_all_spans() -> None:
+    """exact / normalized / none 混合：精确匹配率分母为全部 span（含 invalid）。"""
+    record = make_record(
+        "c1::GOVERNING_LAW",
+        present=Presence.PRESENT,
+        quotes=("a", "b", "c"),
+        spans=(
+            Span(quote="a", start=0, end=1, valid=True, occurrences=1, matched="exact"),
+            Span(quote="b", start=2, end=3, valid=True, occurrences=1, matched="normalized"),
+            Span(quote="c", start=None, end=None, valid=False, occurrences=0, matched="none"),
+        ),
+    )
+    gold = {"c1::GOVERNING_LAW": make_gold("c1::GOVERNING_LAW", has_answer=True, spans=((0, 1),))}
+    metrics = compute([record], gold, seed=42).by_clause[0]
+    assert metrics.citation_exact_rate == pytest.approx(1 / 3)
+    assert metrics.citation_valid_rate == pytest.approx(2 / 3)
+
+
+def test_citation_exact_rate_is_one_when_all_exact() -> None:
+    record = make_record("c1::GOVERNING_LAW", present=Presence.PRESENT, quotes=("a",))
+    gold = {"c1::GOVERNING_LAW": make_gold("c1::GOVERNING_LAW", has_answer=True, spans=((0, 1),))}
+    metrics = compute([record], gold, seed=42).by_clause[0]
+    assert metrics.citation_exact_rate == 1.0
+
+
+def test_citation_exact_rate_none_without_spans() -> None:
+    record = make_record("c1::GOVERNING_LAW", present=Presence.ABSENT, quotes=())
+    gold = {"c1::GOVERNING_LAW": make_gold("c1::GOVERNING_LAW", has_answer=False)}
+    metrics = compute([record], gold, seed=42).by_clause[0]
+    assert metrics.citation_exact_rate is None
 
 
 def test_citation_valid_rate_none_without_any_span() -> None:

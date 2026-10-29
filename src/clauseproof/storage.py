@@ -42,6 +42,7 @@ def _span_to_json(span: Span) -> dict:
         "end": span.end,
         "valid": span.valid,
         "occurrences": span.occurrences,
+        "matched": span.matched,
     }
 
 
@@ -83,12 +84,16 @@ def _judgment_from_json(data: object) -> Judgment:
 def _span_from_json(data: object) -> Span:
     if not isinstance(data, dict):
         raise TypeError(f"spans 元素期望 JSON 对象，实际 {type(data).__name__}")
+    # matched 为 T-011a 新增字段：旧 JSONL 缺失时按 valid 推断（exact / none），
+    # 保证旧运行文件仍可读
+    matched = data.get("matched", "exact" if data["valid"] else "none")
     return Span(
         quote=data["quote"],
         start=data["start"],
         end=data["end"],
         valid=data["valid"],
         occurrences=data["occurrences"],
+        matched=matched,
     )
 
 
