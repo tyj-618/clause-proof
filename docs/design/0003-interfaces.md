@@ -3,7 +3,7 @@
 | 项 | 值 |
 |---|---|
 | 状态 | Draft |
-| 版本 | 0.9 |
+| 版本 | 1.1 |
 | 上游 | [设计 0001](0001-architecture.md)、[设计 0002](0002-data-model.md) |
 
 ## 1. 通用约定
@@ -58,7 +58,8 @@ def apply_route(judgment: Judgment, threshold: float) -> Route
 - **后置**
   - `judgment.present is UNCERTAIN` → `TO_HUMAN`
   - 否则 `confidence ≥ threshold` → `AUTO_PASS`，反之为 `TO_HUMAN`
-- 引用质量**不参与**路由决策（降级已在 `judge` 完成）
+- 引用质量**不参与**路由决策（FR-2 降级由 `runner` 在写盘前应用，
+  `route` 收到的判定已含降级）
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -129,6 +130,10 @@ class ClauseMetrics:
     citation_valid_rate: float | None
     citation_exact_rate: float | None   # matched=="exact" 的 span / 全部 span；无 span 时 None
     ece: float | None
+    mean_input_tokens: float           # M6：OK 记录均值，分母 n_ok；n_ok==0 时 0.0
+    mean_output_tokens: float          # M6：同上
+    mean_cost_cny: float               # M6：单条成本均值，缓存命中记 0 但占分母；n_ok==0 时 0.0
+    p95_latency_ms: float              # M6：仅 OK 记录的 nearest-rank p95；n_ok==0 时 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,3 +458,4 @@ class LLMClient:
 | 0.8 | 2026-10-29 | §3 增补阈值与评估集分离约束：`select_thresholds` 只应在开发集上调用（T-009） |
 | 0.9 | 2026-10-29 | §2 `locate` 三层匹配（精确 → 空白归一化 → 不可定位）与 `pos[]` 位置映射、核心不变量、懒构建约束；§4 `ClauseMetrics` 增加 `citation_exact_rate`（T-011a） |
 | 1.0 | 2026-10-29 | §3 澄清 `target_review_rate` 为上界而非目标值（无收益即停，`target=1.0` 不再承诺全量转人工）；候选集 `1.0` 改为仅保留（T-013） |
+| 1.1 | 2026-10-29 | §3 降级职责澄清：FR-2 降级由 `runner` 在写盘前应用（非 `judge`）；§4 `ClauseMetrics` 补 M6 四字段 `mean_input_tokens` / `mean_output_tokens` / `mean_cost_cny` / `p95_latency_ms`（同步 T-014 实现；T-015） |
