@@ -11,5 +11,5 @@
 | T-009 | CLI 与运行摘要 | ✅ 完成 | T-005, T-007, T-008 | `cli.py` |
 | T-010 | M1 基线实验 | ⏭ 下一步 | T-009 | `results/` `docs/experiments/` |
 | T-011 | 引用定位修复 | ✅ 完成 | T-010 | `locate.py` `scripts/recompute_spans.py` |
-| T-012 | 交付物整理 | ⏭ 下一步 | T-011 | `README.md` `docs/lessons.md` |
+| T-012 | 交付物整理 | ✅ 完成 | T-011 | `README.md` `docs/lessons.md` |
 | T-013 | 修复路由贪心的零收益提升 | ✅ 完成 | T-008 | `route.select_thresholds` |
