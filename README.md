@@ -14,24 +14,24 @@ M1 基线（模型 glm-5.3，openai 协议 / reasoning_effort=low，2026-10-29�
 | 指标 | 值 | 口径 |
 |---|---|---|
 | 判定准确率（宏平均） | **93.2%** | 6 类算术平均，95% CI [0.900, 0.961] |
-| 判定准确率（池化） | 93.8% | 255/272，分母为明确判定条目 |
-| 模糊率 | 9.0% | 27/300，分母为全部条目 |
+| 判定准确率（池化） | 93.7% | 252/269，分母为明确判定条目 |
+| 模糊率 | 10.0% | 30/300，分母为全部条目 |
 | 引用有效率 | **96.0%** | 214/223 条引用可在原文定位 |
 | 引用 IoU 宏平均 | 0.615 | 有效引用与 gold span 的平均 IoU |
-| 转人工率（阈值 0.8） | 11.3% | 34/300 |
-| 自动通过条目准确率 | **94.7%** | 266 条自动通过中判对的比例 |
+| 转人工率（阈值 0.8） | 12.3% | 37/300（含 1 条调用失败） |
+| 自动通过条目准确率 | **94.7%** | 263 条自动通过中判对的比例 |
 | 单条成本 | ¥0.074 | 300 条共 ¥22.29 |
 | 单条延迟 | 2.77 s | 总耗时 14m32s |
 
 数据集：CUAD v1，dev 划分，50 份合同 × 6 类 = 300 条查询，seed=42。
 
-数据来源：`results/m1-baseline-dev.spans-v2.jsonl`（300 条 dev 运行，已含引用定位修复）。
+数据来源：`results/m1-baseline-dev.spans-v3.jsonl`（300 条 dev 运行，已含引用定位修复与 FR-2 降级）。
 分类别数字与运行方式详见[实验记录](docs/experiments/2026-10-28-m1-baseline.md)。
 
 **不需要 API key 即可复算上表**：
 
 ```bash
-clauseproof report --run results/m1-baseline-dev.spans-v2.jsonl
+clauseproof report --run results/m1-baseline-dev.spans-v3.jsonl
 ```
 
 读上表必须连同三个口径：
@@ -67,13 +67,13 @@ clauseproof report --run results/m1-baseline-dev.spans-v2.jsonl
 
 ```bash
 make install        # 安装依赖
-make check          # lint + 443 个测试，提交前必须通过
+make check          # lint + 458 个测试，提交前必须通过
 ```
 
 **看结果（不需要 API key）**
 
 ```bash
-clauseproof report --run results/m1-baseline-dev.spans-v2.jsonl
+clauseproof report --run results/m1-baseline-dev.spans-v3.jsonl
 ```
 
 **跑单条（需要 API key）**
@@ -91,12 +91,12 @@ Anti-Assignment / Termination For Convenience / Notice Period To Terminate Renew
 
 - 仅 dev 划分，报告集尚未运行，因此没有真正的留出集结论
 - 单种子、单次运行，未做重复实验；置信区间只反映抽样不确定性
-- `Cap On Liability` 是最弱的一类：准确率 80.6%、引用 IoU 0.28，且占据全部模糊条目的过半（14/27）
+- `Cap On Liability` 是最弱的一类：准确率 80.6%、引用 IoU 0.28，模糊条目 14 条，占全部模糊的 46.7%（14/30）
 - 引用 IoU 的标注口径为 CUAD gold span；不同标注规范下该数字会变化
 
 ## 怎么做的
 
-13 个任务拆解，每个任务先写契约（接口 + 不变量 + 验收标准）再实现；
+14 个任务拆解，每个任务先写契约（接口 + 不变量 + 验收标准）再实现；
 契约变更先于代码提交，实现者与评审者分离。
 关键决策记录在 6 份 [ADR](docs/adr/README.md)，踩过的坑沉淀为 16 条[工程心得](docs/lessons.md)。
 
@@ -119,7 +119,7 @@ Anti-Assignment / Termination For Convenience / Notice Period To Terminate Renew
 | P4 实现 | ✅ | T-001~T-011：数据模型、模型调用、判定器、数据加载、落盘、协议切换、指标、路由、CLI、引用定位修复 |
 | P5 交付 | ✅ | T-012 / T-013：结果与限制（本文件）、工程心得、实验记录、M4 曲线、路由贪心修复 |
 
-**当前进度**：代码、实验与交付物均已完成（443 个测试通过，12 个模块）。
+**当前进度**：代码、实验与交付物均已完成（458 个测试通过，12 个模块）。
 报告集留出验证尚未运行，配额保留。
 
 ## 文档
@@ -139,7 +139,7 @@ Anti-Assignment / Termination For Convenience / Notice Period To Terminate Renew
 
 | 产物 | 文件 | 是否需 API key |
 |---|---|---|
-| M1 基线（300 条 dev） | `results/m1-baseline-dev.spans-v2.jsonl` | 否 |
+| M1 基线（300 条 dev） | `results/m1-baseline-dev.spans-v3.jsonl` | 否 |
 | 协议 A/B（18 条对照） | `results/smoke-t005.jsonl` / `smoke-t006.jsonl` | 否 |
 | M4 曲线（拟合/评估分组） | `results/m1-fit.jsonl` / `m1-eval.jsonl` | 否 |
 
