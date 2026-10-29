@@ -665,10 +665,14 @@ def test_report_curve_matches_hand_computed_points(
 ) -> None:
     """手算曲线用例：6 条记录（gold 仅 GL / ANTI 有答案），两批不同置信度。
 
-    来源运行在 0.2 / 1.0 两个目标复核率下的贪心（route.select_thresholds）：
-    - 0.2：来源贪心只把 GL 提到 0.99 → 评测侧 GL(0.95) 与 UNCERTAIN 转人工，
-      实际复核率 2/6 = 0.333，自动通过 4 条中 UNCAP 错 → 0.750 / 0.833
-    - 1.0：来源把各类别都推到 1.0 → 评测侧全部转人工 → 1.000 / - / 1.000
+    来源运行在 0.2 / 1.0 两个目标复核率下的贪心（route.select_thresholds；
+    T-013 后 target_review_rate 为上界、零收益即停）：
+    - 0.2：来源唯一收益提升（UNCAP 提到 1.0 翻出 0.95 判错记录）需复核率
+      2/6 = 0.333，超出 0.2 预算 → 阈值全 0；评测侧仅 UNCERTAIN 转人工，
+      实际复核率 1/6 = 0.167，自动通过 5 条中 UNCAP 错 → 0.800 / 0.833
+    - 1.0：来源只做收益提升（UNCAP 提到 1.0）后零收益停止 → 评测侧
+      UNCAP(0.60) 与 UNCERTAIN 转人工，实际复核率 2/6 = 0.333，
+      自动通过 4 条全对 → 0.333 / 1.000 / 1.000
     """
     run_judgments = {
         ClauseKey.GOVERNING_LAW: _present(0.95),
@@ -714,9 +718,9 @@ def test_report_curve_matches_hand_computed_points(
     assert len(rows) == 2
     first, second = rows
     assert first.group(1) == "0.200"
-    assert first.group(2) == "0.333"
-    assert first.group(3) == "0.750"
+    assert first.group(2) == "0.167"
+    assert first.group(3) == "0.800"
     assert first.group(4) == "0.833"
-    assert second.group(2) == "1.000"
-    assert second.group(3) == "-"
+    assert second.group(2) == "0.333"
+    assert second.group(3) == "1.000"
     assert second.group(4) == "1.000"

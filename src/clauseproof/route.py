@@ -5,14 +5,20 @@
 引用质量不参与路由决策（降级已在 judge 完成）。
 
 select_thresholds 的确定性贪心（0003 §3 要求在此写明）：
+- target_review_rate 是上界而非目标值：算法在「再升一档也不能减少错误」时停止，
+  不为凑满复核率把判对的条目推给人工，因此实际复核率常低于目标值（T-013）
 - 候选阈值：每类别 = 该类别 OK 记录实际出现过的 confidence 值（去重升序）∪ {0.0, 1.0}。
-  加入 1.0 是为了让 target=1.0 时能把各类别最高置信度的判定记录也推到人工；
+  1.0 仅为候选完备性保留（无害），target=1.0 不承诺全量转人工——无收益即停；
   confidence 恰为 1.0 的记录仍会因 >= 语义自动通过（0003 §3 已知边界）
 - 初始全部类别阈值为 0.0（尽可能自动）；UNCERTAIN 与失败记录必然转人工，
   故起始复核率即不可约复核率，target 低于它时抛 ValueError
-- 每轮对每个尚有候选的类别取「下一档」（候选中略大于当前阈值的值），收益比 =
-  该档新增转人工记录中的错误数 / 新增转人工数（新增为 0 时记 0）；
-  取收益比最大的类别提升一档，并列按 ClauseKey 定义顺序取第一个
+- 每轮对每个类别取「下一档」= 候选中略大于当前阈值、且能减少错误的最小值：
+  空档（不使任何记录改判）与零收益档（只翻出判对记录）都被跳过——
+  升到这些档位不减少任何错误；收益比 = 该档新增转人工记录中的错误数 /
+  新增转人工数，取收益比最大的类别提升一档，并列按 ClauseKey 定义顺序取第一个
+- 所有类别都不存在能减少错误的档位时停止（「再升一档也不能减少错误」）：
+  继续升档只会把判对的条目推给人工、拉低自动通过准确率却不减少错误
+  （T-013 修复的零收益提升）；target=1.0 也停在此无收益停止点，不承诺全量转人工
 - 若最优提升会使整体复核率（转人工数 / 全部记录数，分母含失败记录）超过
   target + 1e-9，则停止（不退而求其次）；否则应用提升并继续，直至无可提升
 - 「判定正确」口径与 metrics 相同（gold.has_answer 与 present 是否 PRESENT 一致），
@@ -73,6 +79,8 @@ def select_thresholds(
 ) -> dict[ClauseKey, float]:
     """在整体复核率 ≤ target_review_rate 的前提下确定性地选各类别阈值（算法见模块 docstring）。
 
+    target_review_rate 是上界而非目标值：算法在「再升一档也不能减少错误」时停止，
+    不为凑满复核率把判对的条目推给人工，因此实际复核率常低于目标值。
     返回恰好 6 个键（全部 ClauseKey），值为该类别候选集中的元素；
     同一输入两次调用返回完全相同的字典。
     """
@@ -97,9 +105,9 @@ def select_thresholds(
     while True:
         best = _best_raise(candidates, decided, thresholds, gold)
         if best is None:
-            break
+            break  # 无收益停止点：任何类别再升一档也不能减少错误
         clause, next_value, added = best
-        if added and (human_count + added) / n_total > target_review_rate + _RATE_TOLERANCE:
+        if (human_count + added) / n_total > target_review_rate + _RATE_TOLERANCE:
             break
         thresholds[clause] = next_value
         human_count += added
@@ -171,7 +179,7 @@ def _routing_stats(
 def _candidates(clause_records: Sequence[Record]) -> list[float]:
     """候选阈值 = 该类别 OK 记录实际出现过的 confidence 值（去重升序）∪ {0.0, 1.0}。
 
-    加入 1.0 是为了让 target=1.0 时能把各类别最高置信度的判定记录也推到人工；
+    1.0 仅为候选完备性保留（无害），target=1.0 不承诺全量转人工——无收益即停（T-013）；
     confidence 恰为 1.0 的记录仍会因 >= 语义自动通过（0003 §3 已知边界）。
     """
     values = {record.judgment.confidence for record in clause_records if record.status is Status.OK}
@@ -200,26 +208,35 @@ def _best_raise(
 ) -> tuple[ClauseKey, float, int] | None:
     """收益比（减少错误数 / 增加复核数）最大的下一档提升。
 
-    返回 (类别, 下一档阈值, 新增转人工数)；各类别均已无可提升时 None。
+    「下一档」= 候选中略大于当前阈值、且能减少错误的最小值：空档（不使任何
+    判定记录改判，如 UNCERTAIN 记录的 confidence 档位）与零收益档（只翻出
+    判对记录）都被跳过，因为升到这些档位不减少任何错误；零收益档之后的
+    更高档位可能翻出错档之后的判错记录，故跳过而非终止。
+    返回 (类别, 下一档阈值, 新增转人工数)；任何类别都无可减少错误的档位时 None。
     并列按 ClauseKey 定义顺序取第一个（仅严格更大才替换）。
-    新增转人工数沿用 apply_route 规则：confidence 落在 [当前阈值, 下一档) 的判定记录改判。
+    新增转人工沿用 apply_route 规则：confidence 落在 [当前阈值, 下一档) 的判定记录改判。
     """
     best: tuple[ClauseKey, float, int] | None = None
     best_ratio = -1.0
     for clause in ClauseKey:
         current = thresholds[clause]
-        next_value = next((value for value in candidates[clause] if value > current), None)
-        if next_value is None:
-            continue
-        flipped = [
-            record
-            for record in decided[clause]
-            if current <= record.judgment.confidence < next_value
-        ]
-        added = len(flipped)
-        errors = sum(1 for record in flipped if not _is_correct(record, gold))
-        ratio = errors / added if added else 0.0
-        if ratio > best_ratio:
-            best = (clause, next_value, added)
-            best_ratio = ratio
+        for value in candidates[clause]:
+            if value <= current:
+                continue
+            flipped = [
+                record
+                for record in decided[clause]
+                if current <= record.judgment.confidence < value
+            ]
+            if not flipped:
+                continue
+            errors = sum(1 for record in flipped if not _is_correct(record, gold))
+            if errors == 0:
+                continue
+            added = len(flipped)
+            ratio = errors / added
+            if ratio > best_ratio:
+                best = (clause, value, added)
+                best_ratio = ratio
+            break  # 该类别只取最小的能减少错误的档位，更高档留给后续轮次
     return best

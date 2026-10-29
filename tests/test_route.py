@@ -175,6 +175,37 @@ def _all_failed_dataset() -> tuple[list[Record], dict[str, GoldLabel]]:
     return records, {}
 
 
+def _curve_dataset() -> tuple[list[Record], dict[str, GoldLabel]]:
+    """13 条合成记录：8 对 4 错 + 1 条 UNCERTAIN，置信度档位交错（T-013 无支配验证）。
+
+    不可约复核率 = 1/13。各类别的收益档（翻出判错记录）之后仍留有
+    零收益档（只翻判对记录）：修复前的贪心会在高目标复核率下继续升档，
+    复核率上升而自动通过准确率下降。
+    """
+    specs = [
+        (ClauseKey.GOVERNING_LAW, Presence.PRESENT, 0.3, False, True),  # 判错
+        (ClauseKey.GOVERNING_LAW, Presence.PRESENT, 0.5, True, True),
+        (ClauseKey.GOVERNING_LAW, Presence.PRESENT, 0.7, True, True),
+        (ClauseKey.GOVERNING_LAW, Presence.PRESENT, 0.9, True, True),
+        (ClauseKey.CAP_ON_LIABILITY, Presence.ABSENT, 0.4, True, True),  # 判错
+        (ClauseKey.CAP_ON_LIABILITY, Presence.ABSENT, 0.6, True, True),  # 判错
+        (ClauseKey.CAP_ON_LIABILITY, Presence.ABSENT, 0.8, False, True),
+        (ClauseKey.UNCAP_LIABILITY, Presence.PRESENT, 0.55, False, True),  # 判错
+        (ClauseKey.UNCAP_LIABILITY, Presence.ABSENT, 0.75, False, True),
+        (ClauseKey.UNCAP_LIABILITY, Presence.ABSENT, 0.95, False, True),
+        (ClauseKey.TERMINATION_FOR_CONVENIENCE, Presence.ABSENT, 0.65, False, True),
+        (ClauseKey.NOTICE_PERIOD_TO_TERMINATE_RENEWAL, Presence.ABSENT, 0.85, False, True),
+        (ClauseKey.ANTI_ASSIGNMENT, Presence.UNCERTAIN, 0.5, True, True),
+    ]
+    records: list[Record] = []
+    gold: dict[str, GoldLabel] = {}
+    for index, (clause, present, confidence, has_answer, ok) in enumerate(specs):
+        query_id = f"{_CONTRACT_ID}::{clause.name}::{index}"
+        records.append(_record(clause, query_id, present, confidence, ok=ok))
+        gold[query_id] = _gold(query_id, has_answer)
+    return records, gold
+
+
 def _review_rate(records: list[Record], thresholds: dict[ClauseKey, float]) -> float:
     """用 apply_route 重算转人工率（分母含失败记录，同 select_thresholds 口径）。"""
     n_human = sum(
@@ -230,26 +261,36 @@ def test_select_thresholds_below_irreducible_floor_raises(target: float) -> None
     assert str(_IRREDUCIBLE_FLOOR) in message
 
 
-def test_select_thresholds_max_target_caps_all_thresholds_at_one() -> None:
+def test_select_thresholds_max_target_matches_no_gain_stopping_point() -> None:
+    """T-013：target=1.0 不再取满候选，结果与无收益停止点一致（此处同 target=0.5）。"""
     records, gold = _dataset()
     thresholds = select_thresholds(records, gold, target_review_rate=1.0)
-    assert set(thresholds.values()) == {1.0}
-    # 数据中无 confidence == 1.0 的记录，故全部转人工
-    assert _review_rate(records, thresholds) == 1.0
+    assert thresholds == select_thresholds(records, gold, target_review_rate=0.5)
+    # 两条判错记录已翻给人工，再升一档只能翻出判对记录 → 停止，复核率不再上升
+    assert _review_rate(records, thresholds) == pytest.approx(0.5)
 
 
-def test_confidence_exactly_one_still_auto_passes_at_max_threshold() -> None:
-    records, gold = _dataset()
-    clause = ClauseKey.UNCAP_LIABILITY
-    query_id = f"{_CONTRACT_ID}::{clause.name}::one"
-    records.append(_record(clause, query_id, Presence.ABSENT, 1.0))
-    gold[query_id] = _gold(query_id, False)
+def test_confidence_exactly_one_still_auto_passes_at_unit_threshold() -> None:
+    """收益提升把类别阈值推到 1.0 时，confidence 恰为 1.0 的记录仍自动通过。"""
+    specs = [
+        (ClauseKey.UNCAP_LIABILITY, Presence.PRESENT, 0.99, False, True),  # 判错
+        (ClauseKey.UNCAP_LIABILITY, Presence.ABSENT, 1.0, False, True),
+        (ClauseKey.GOVERNING_LAW, Presence.PRESENT, 0.9, True, True),
+        (ClauseKey.ANTI_ASSIGNMENT, Presence.UNCERTAIN, 0.5, True, True),  # 不可约转人工
+    ]
+    records: list[Record] = []
+    gold: dict[str, GoldLabel] = {}
+    for index, (clause, present, confidence, has_answer, ok) in enumerate(specs):
+        query_id = f"{_CONTRACT_ID}::{clause.name}::{index}"
+        records.append(_record(clause, query_id, present, confidence, ok=ok))
+        gold[query_id] = _gold(query_id, has_answer)
     thresholds = select_thresholds(records, gold, target_review_rate=1.0)
-    judgment = records[-1].judgment
+    # UNCAP_LIABILITY 唯一的收益提升：翻出 0.99 的判错记录，阈值取候选 1.0
+    assert thresholds[ClauseKey.UNCAP_LIABILITY] == 1.0
+    judgment = records[1].judgment
     assert judgment is not None
     # 已知边界（0003 §3）：confidence 恰为 1.0 无法被阈值推给人工（>= 语义）
-    assert apply_route(judgment, thresholds[clause]) is Route.AUTO_PASS
-    assert _review_rate(records, thresholds) < 1.0
+    assert apply_route(judgment, thresholds[ClauseKey.UNCAP_LIABILITY]) is Route.AUTO_PASS
 
 
 def test_select_thresholds_review_rate_monotone_in_target() -> None:
@@ -264,8 +305,8 @@ def test_select_thresholds_review_rate_monotone_in_target() -> None:
 def test_zero_thresholds_when_budget_equals_irreducible_floor() -> None:
     records, gold = _dataset()
     thresholds = select_thresholds(records, gold, target_review_rate=_IRREDUCIBLE_FLOOR)
-    # 预算只够不可约部分：任何新增转人工的提升都放不进预算，
-    # 非模糊条目全部自动通过（no-op 爬档可越过空档，但不改变任何路由）
+    # 预算只够不可约部分：首个收益提升（翻出判错记录）也放不进预算，
+    # 非模糊条目全部自动通过
     for record in records:
         if record.status is Status.OK and record.judgment.present is not Presence.UNCERTAIN:
             assert apply_route(record.judgment, thresholds[record.clause]) is Route.AUTO_PASS
@@ -275,7 +316,8 @@ def test_zero_thresholds_when_budget_equals_irreducible_floor() -> None:
 def test_all_failed_records_are_the_irreducible_floor() -> None:
     records, gold = _all_failed_dataset()
     thresholds = select_thresholds(records, gold, target_review_rate=1.0)
-    assert set(thresholds.values()) == {1.0}
+    # 无可改判记录：任何提升都不减少错误，无收益停止点即全部阈值保持 0.0
+    assert set(thresholds.values()) == {0.0}
     assert _review_rate(records, thresholds) == 1.0
     with pytest.raises(ValueError) as excinfo:
         select_thresholds(records, gold, target_review_rate=0.99)
@@ -297,19 +339,48 @@ def test_sweep_returns_one_point_per_rate_within_budget_and_monotone() -> None:
 def test_sweep_point_metrics_follow_the_contract_formulas() -> None:
     records, gold = _dataset()
     points = sweep(records, gold, review_rates=[0.25, 0.5, 0.75, 1.0])
-    # 0.25：6 条判定记录全部自动通过，其中 2 条判错
+    # 0.25：预算只够不可约部分，6 条判定记录全部自动通过，其中 2 条判错
     assert points[0].auto_pass_accuracy == pytest.approx(4 / 6)
     assert points[0].post_review_accuracy == pytest.approx(1.0 - 2 / 8)
-    # 0.5：GOVERNING_LAW 两条转人工，剩 4 条判定记录中 1 条判错
-    assert points[1].auto_pass_accuracy == pytest.approx(3 / 4)
-    assert points[1].post_review_accuracy == pytest.approx(1.0 - 1 / 8)
-    # 0.75：仅剩 UNCAP_LIABILITY 与 TERMINATION 两条判对记录自动通过
+    # 0.5：两条判错记录（GL 0.4 / CAP 0.3）转人工（空档 0.4、0.3 被跳过，
+    # 阈值直接取会改判的 0.9 / 0.8），自动通过的 4 条全对 —— 收益提升仍正常工作
+    assert points[1].thresholds == {
+        ClauseKey.GOVERNING_LAW: 0.9,
+        ClauseKey.CAP_ON_LIABILITY: 0.8,
+        ClauseKey.UNCAP_LIABILITY: 0.0,
+        ClauseKey.ANTI_ASSIGNMENT: 0.0,
+        ClauseKey.TERMINATION_FOR_CONVENIENCE: 0.0,
+        ClauseKey.NOTICE_PERIOD_TO_TERMINATE_RENEWAL: 0.0,
+    }
+    assert points[1].actual_review_rate == pytest.approx(0.5)
+    assert points[1].auto_pass_accuracy == pytest.approx(1.0)
+    assert points[1].post_review_accuracy == pytest.approx(1.0)
+    # 0.75 / 1.0：再升一档只能翻出判对记录（零收益），停在同一个无收益停止点
+    assert points[2].thresholds == points[1].thresholds
+    assert points[3].thresholds == points[1].thresholds
     assert points[2].auto_pass_accuracy == pytest.approx(1.0)
-    assert points[2].post_review_accuracy == pytest.approx(1.0)
-    # 1.0：无自动通过条目
-    assert points[3].auto_pass_accuracy is None
-    assert points[3].post_review_accuracy == 1.0
-    assert set(points[3].thresholds.values()) == {1.0}
+    assert points[3].auto_pass_accuracy == pytest.approx(1.0)
+
+
+def test_sweep_targets_low_to_high_have_no_dominated_points() -> None:
+    """T-013 验收：target 从低到高，不存在「复核率更高且自动通过准确率更低」的支配点。"""
+    records, gold = _curve_dataset()
+    points = sweep(records, gold, review_rates=[0.1, 0.2, 0.3, 0.4, 0.6, 1.0])
+    # 曲线确实上升（数据非平凡），低目标未翻错、高目标翻尽判错记录后平台化
+    assert points[0].auto_pass_accuracy is not None
+    assert points[-1].auto_pass_accuracy is not None
+    assert points[0].auto_pass_accuracy < points[-1].auto_pass_accuracy
+    for point in points:
+        for other in points:
+            if point is other:
+                continue
+            if point.auto_pass_accuracy is None or other.auto_pass_accuracy is None:
+                continue
+            dominated = (
+                point.actual_review_rate > other.actual_review_rate
+                and point.auto_pass_accuracy < other.auto_pass_accuracy
+            )
+            assert not dominated, f"曲线点被支配：{point} vs {other}"
 
 
 def test_sweep_unsatisfiable_rate_fails_without_truncation() -> None:
