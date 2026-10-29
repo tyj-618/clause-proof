@@ -17,6 +17,11 @@
 | 结论 | 一句话 |
 | 异常 | 失败分布、超上下文条数、可疑现象 |
 
+## 记录索引
+
+- [`2026-10-27-protocol-ab.md`](2026-10-27-protocol-ab.md) —— 协议 A/B（anthropic/max vs openai/low）
+- [`2026-10-28-m1-baseline.md`](2026-10-28-m1-baseline.md) —— M1 基线（300 条 dev）
+
 ## 报告集使用配额
 
 报告集（`split=report`）全项目最多运行 2 次。每次使用必须在下面登记。
