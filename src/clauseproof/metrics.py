@@ -15,6 +15,9 @@
 - 校准：分类别 ece 与全局 Report.ece 同用等频 10 桶 / min_bin_size 30；不足 2 个
   非空桶时 ECE 为 None（单桶退化为 |平均准确率 − 平均置信度|，不构成校准误差），
   对外报告的校准指标用 Report.ece（全局）
+- M6 用量指标（分类别 mean_input_tokens / mean_output_tokens / mean_cost_cny /
+  p95_latency_ms）分母为 n_ok；缓存命中与失败记录成本记 0 但仍占分母，
+  n_ok==0 时四个值均为 0.0（同 Report 层口径）
 """
 
 from __future__ import annotations
@@ -58,6 +61,10 @@ class ClauseMetrics:
     citation_valid_rate: float | None  # 有效 span / 全部 span；无 span 时 None
     citation_exact_rate: float | None  # matched=="exact" 的 span / 全部 span；无 span 时 None
     ece: float | None  # 该类别 n_decided 条 (confidence, 正确) 的期望校准误差
+    mean_input_tokens: float  # M6：OK 记录均值，分母 n_ok；n_ok==0 时 0.0
+    mean_output_tokens: float  # M6：同上
+    mean_cost_cny: float  # M6：单条成本均值，缓存命中记 0 但占分母；n_ok==0 时 0.0
+    p95_latency_ms: float  # M6：仅 OK 记录的 nearest-rank p95；n_ok==0 时 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +224,9 @@ def _clause_metrics(
         n_bins=_CALIBRATION_N_BINS,
         min_bin_size=_CALIBRATION_MIN_BIN_SIZE,
     )
+    mean_input_tokens, mean_output_tokens, mean_cost_cny, p95_latency_ms = _usage_metrics(
+        ok_records
+    )
     return ClauseMetrics(
         clause=clause,
         n_total=len(records),
@@ -242,7 +252,27 @@ def _clause_metrics(
         citation_valid_rate=valid_rate,
         citation_exact_rate=exact_rate,
         ece=expected_calibration_error(bins),
+        mean_input_tokens=mean_input_tokens,
+        mean_output_tokens=mean_output_tokens,
+        mean_cost_cny=mean_cost_cny,
+        p95_latency_ms=p95_latency_ms,
     ), calibration_pairs
+
+
+def _usage_metrics(ok_records: Sequence[Record]) -> tuple[float, float, float, float]:
+    """M6 用量指标：(平均输入 token, 平均输出 token, 平均成本, p95 延迟)。
+
+    分母为 n_ok（PRD M6）；成本口径同 _total_cost_cny（缓存命中记 0 但占分母）；
+    p95 为 nearest-rank（ceil(0.95·n)−1，同 Report 层）；n_ok==0 时全部为 0.0。
+    """
+    n_ok = len(ok_records)
+    latencies = sorted(record.latency_ms for record in ok_records)
+    return (
+        sum(record.input_tokens for record in ok_records) / n_ok if n_ok else 0.0,
+        sum(record.output_tokens for record in ok_records) / n_ok if n_ok else 0.0,
+        sum(_record_cost_cny(record) for record in ok_records) / n_ok if n_ok else 0.0,
+        latencies[ceil(_P95_QUANTILE * n_ok) - 1] if latencies else 0.0,
+    )
 
 
 def _citation_metrics(
@@ -311,15 +341,17 @@ def _accuracy_ci(
     return (low, high)
 
 
+def _record_cost_cny(record: Record) -> float:
+    """单条记录按 token 重算的成本：缓存命中与失败记录记 0（0003 §10）。"""
+    if record.status is not Status.OK or record.cached:
+        return 0.0
+    prices = prices_for(record.model)
+    return (
+        record.input_tokens * prices.input_cny_per_mtok
+        + record.output_tokens * prices.output_cny_per_mtok
+    ) / 1e6
+
+
 def _total_cost_cny(records: Sequence[Record]) -> float:
     """按 token 重算的总成本：缓存命中与失败记录记 0（0003 §10）。"""
-    total = 0.0
-    for record in records:
-        if record.status is not Status.OK or record.cached:
-            continue
-        prices = prices_for(record.model)
-        total += (
-            record.input_tokens * prices.input_cny_per_mtok
-            + record.output_tokens * prices.output_cny_per_mtok
-        ) / 1e6
-    return total
+    return sum(_record_cost_cny(record) for record in records)

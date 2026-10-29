@@ -18,9 +18,10 @@ from clauseproof.models import (
     Query,
     Route,
     RunMeta,
+    Span,
     Status,
 )
-from clauseproof.runner import run
+from clauseproof.runner import downgrade_unverifiable, run
 from clauseproof.storage import append_record, read_meta, read_records
 
 _TEXT = "Alpha Corp is governed by the laws of the State of New York."
@@ -40,11 +41,18 @@ _FIXED_JUDGMENT = Judgment(
 class FakeJudge:
     """固定结果判定器：fail_ids 中的查询抛 RuntimeError，其余返回固定 Judgment。
 
+    judgment 缺省为 _FIXED_JUDGMENT，可覆盖以构造降级等场景；
     calls 记录实际调用过的 query_id，用于断言「不重复调用 judge」。
     """
 
-    def __init__(self, *, fail_ids: frozenset[str] = frozenset()) -> None:
+    def __init__(
+        self,
+        *,
+        fail_ids: frozenset[str] = frozenset(),
+        judgment: Judgment = _FIXED_JUDGMENT,
+    ) -> None:
         self.fail_ids = fail_ids
+        self.judgment = judgment
         self.calls: list[str] = []
 
     def judge(self, query: Query) -> tuple[Judgment, CallMeta]:
@@ -59,7 +67,7 @@ class FakeJudge:
             latency_ms=3.5,
             cached=False,
         )
-        return _FIXED_JUDGMENT, meta
+        return self.judgment, meta
 
 
 def make_queries(n: int) -> tuple[Query, ...]:
@@ -323,6 +331,106 @@ def test_meta_written_before_processing(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError):
         _run(tmp_path, queries=queries, judge=judge, max_failures=1)
     assert read_meta(tmp_path / "t-run.meta.json") == make_meta(3)
+
+
+# ---------- FR-2 降级（T-014） ----------
+
+
+def _span(valid: bool, quote: str = "q") -> Span:
+    """构造合法/非法 Span：非法时不产出区间（0002 §7）。"""
+    if valid:
+        return Span(
+            quote=quote, start=0, end=len(quote), valid=True, occurrences=1, matched="exact"
+        )
+    return Span(quote=quote, start=None, end=None, valid=False, occurrences=0, matched="none")
+
+
+def test_downgrade_unverifiable_all_invalid_spans() -> None:
+    judgment = Judgment(
+        present=Presence.PRESENT,
+        quotes=("miss",),
+        confidence=0.95,
+        raw_output="...",
+        parse_ok=True,
+    )
+    downgraded = downgrade_unverifiable(judgment, (_span(False),))
+    assert downgraded.present is Presence.UNCERTAIN
+    assert downgraded.quotes == ("miss",)  # quotes 原样保留（失效率统计需要）
+    assert downgraded.confidence == 0.95
+    assert downgraded.raw_output == "..."
+    assert downgraded.parse_ok is True
+
+
+def test_downgrade_unverifiable_keeps_present_when_any_span_valid() -> None:
+    judgment = Judgment(
+        present=Presence.PRESENT,
+        quotes=("hit", "miss"),
+        confidence=0.9,
+        raw_output="...",
+        parse_ok=True,
+    )
+    assert downgrade_unverifiable(judgment, (_span(True), _span(False))) is judgment
+
+
+def test_downgrade_unverifiable_keeps_non_present_judgments() -> None:
+    absent = Judgment(
+        present=Presence.ABSENT, quotes=(), confidence=0.9, raw_output="...", parse_ok=True
+    )
+    uncertain = Judgment(
+        present=Presence.UNCERTAIN, quotes=(), confidence=0.5, raw_output="...", parse_ok=True
+    )
+    assert downgrade_unverifiable(absent, ()) is absent
+    assert downgrade_unverifiable(uncertain, (_span(False),)) is uncertain
+
+
+def test_ok_record_downgrades_and_routes_to_human(tmp_path: Path) -> None:
+    # PRESENT + 唯一引用不在原文 → 降级为 UNCERTAIN，路由必为转人工（FR-2）
+    judgment = Judgment(
+        present=Presence.PRESENT,
+        quotes=("not in text",),
+        confidence=0.95,
+        raw_output="...",
+        parse_ok=True,
+    )
+    path = _run(tmp_path, queries=make_queries(1), judge=FakeJudge(judgment=judgment))
+    (record,) = read_records(path)
+    assert record.status is Status.OK
+    assert record.judgment.present is Presence.UNCERTAIN
+    assert record.judgment.quotes == ("not in text",)  # 落盘记录保留原文引用
+    assert len(record.spans) == 1
+    assert record.spans[0].valid is False
+    assert record.route is Route.TO_HUMAN
+
+
+@pytest.mark.parametrize("threshold", [0.0, 0.5, 0.99])
+def test_downgraded_record_routes_to_human_at_any_threshold(
+    tmp_path: Path, threshold: float
+) -> None:
+    # 降级后的 UNCERTAIN 恒转人工，与阈值无关（apply_route 的首位规则）
+    judgment = Judgment(
+        present=Presence.PRESENT,
+        quotes=("not in text",),
+        confidence=1.0,
+        raw_output="...",
+        parse_ok=True,
+    )
+    path = _run(
+        tmp_path,
+        queries=make_queries(1),
+        judge=FakeJudge(judgment=judgment),
+        thresholds={c: threshold for c in ClauseKey},
+    )
+    (record,) = read_records(path)
+    assert record.judgment.present is Presence.UNCERTAIN
+    assert record.route is Route.TO_HUMAN
+
+
+def test_partial_valid_spans_do_not_downgrade(tmp_path: Path) -> None:
+    # _FIXED_JUDGMENT：一条引用可定位、一条不可 → 保持 PRESENT，路由按阈值
+    path = _run(tmp_path, queries=make_queries(1), judge=FakeJudge())
+    (record,) = read_records(path)
+    assert record.judgment.present is Presence.PRESENT
+    assert record.route is Route.AUTO_PASS  # confidence 0.9 >= 阈值 0.8
 
 
 def _ok_record_for(query_id: str):

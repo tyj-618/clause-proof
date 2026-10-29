@@ -1,4 +1,4 @@
-"""批量编排：逐条调用 judge → 定位引用 → 路由决策 → 落盘，支持续跑与连续失败熔断。
+"""批量编排：逐条调用 judge → 定位引用 → FR-2 降级 → 路由决策 → 落盘，支持续跑与连续失败熔断。
 
 契约见 docs/design/0003-interfaces.md §6、docs/design/0004-error-semantics.md §2 与 §5，
 函数签名以 tasks/T-005.md 为准（单阈值 threshold；select_thresholds 留待 T-006）。
@@ -11,12 +11,22 @@ CONTEXT_OVERFLOW 的判定不在本任务范围：当前端点上下文 1M，最
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from clauseproof.judge import CallMeta, Judge
 from clauseproof.locate import locate
-from clauseproof.models import ClauseKey, Judgment, Query, Record, RunMeta, Status
+from clauseproof.models import (
+    ClauseKey,
+    Judgment,
+    Presence,
+    Query,
+    Record,
+    RunMeta,
+    Span,
+    Status,
+)
 from clauseproof.route import apply_route
 from clauseproof.storage import append_record, read_records, write_meta
 
@@ -52,6 +62,19 @@ def _failed_record(run_meta: RunMeta, query: Query, error_detail: str) -> Record
     )
 
 
+def downgrade_unverifiable(judgment: Judgment, spans: Sequence[Span]) -> Judgment:
+    """FR-2 降级：判定为「有」但全部引用定位失败时改为「模糊」。
+
+    quotes 原样保留（失效率统计需要；Judgment 允许 UNCERTAIN 携带 quotes），
+    只改 present。降级后的判定经 apply_route 必然转人工（UNCERTAIN 恒转人工）。
+    PRESENT 蕴含 quotes 非空（0002 §7），故 spans 非空；非 PRESENT 或存在任一
+    有效引用时原样返回。
+    """
+    if judgment.present is Presence.PRESENT and spans and all(not span.valid for span in spans):
+        return replace(judgment, present=Presence.UNCERTAIN)
+    return judgment
+
+
 def _ok_record(
     run_meta: RunMeta,
     query: Query,
@@ -59,8 +82,13 @@ def _ok_record(
     call: CallMeta,
     threshold: float,
 ) -> Record:
-    """OK 记录：judgment / spans / route 齐全，计量字段来自 CallMeta。"""
+    """OK 记录：judgment / spans / route 齐全，计量字段来自 CallMeta。
+
+    写入前先做 FR-2 降级（present==PRESENT 且全部 span 无效 → UNCERTAIN），
+    路由在降级后的判定上计算。
+    """
     spans = locate(judgment.quotes, query.contract_text)
+    judgment = downgrade_unverifiable(judgment, spans)
     return Record(
         run_id=run_meta.run_id,
         query_id=query.query_id,

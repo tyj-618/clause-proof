@@ -602,19 +602,82 @@ def test_report_outputs_metrics_table(monkeypatch: pytest.MonkeyPatch, tmp_path:
     result = cli_runner.invoke(app, ["report", "--run", str(out / "t-run.jsonl")])
     assert result.exit_code == 0
     out_text = result.output
-    for header in ("n_total", "n_decided", "n_correct", "accuracy", "引用准确率", "ECE"):
+    for header in (
+        "n_total",
+        "n_decided",
+        "n_correct",
+        "accuracy",
+        "引用准确率",
+        "ECE",
+        "in_tok",
+        "out_tok",
+        "cost¥",
+        "p95_ms",
+    ):
         assert header in out_text
     for clause in ClauseKey:
         assert clause.value in out_text
     # gold：Governing Law / Anti-Assignment 有答案，其余无 → 全判 PRESENT 时
-    # 前两类正确（1.000），后四类误检（0.000）
+    # 前两类正确（1.00），后四类误检（0.00）；比率统一 2 位小数（FR-7）
     gl_line = next(line for line in out_text.splitlines() if line.startswith("Governing Law"))
-    assert "1.000" in gl_line
+    assert "1.00" in gl_line
+    assert "7152" in gl_line  # M6：平均输入 token（FakeJudge 固定 7152）
+    assert "0.060" in gl_line  # M6：单条成本 (7152×8 + 94×28) / 1e6
     cap_line = next(line for line in out_text.splitlines() if line.startswith("Cap On Liability"))
-    assert "0.000" in cap_line
-    assert "宏平均 accuracy 0.333" in out_text  # (1 + 1 + 0×4) / 6
+    assert "0.00" in cap_line
+    assert "宏平均 accuracy 0.33" in out_text  # (1 + 1 + 0×4) / 6
     assert "模糊率 0.0%（0/6）" in out_text
     assert "全局 ECE" in out_text
+
+
+def test_fmt_opt_rounds_ratios_to_two_decimals() -> None:
+    """FR-7 显示层：比率格式化统一 2 位小数；None 仍记 "-"。"""
+    assert cli._fmt_opt(0.8056) == "0.81"
+    assert cli._fmt_opt(0.999) == "1.00"
+    assert cli._fmt_opt(0.0958) == "0.10"
+    assert cli._fmt_opt(None) == "-"
+
+
+def test_report_uncertain_rate_rounded_to_two_decimals(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FR-7：模糊率先 round(x, 2) 再换算百分比（1/6 → 0.17 → 17.0%）。"""
+    judgments = _uniform(_absent(0.9))
+    judgments[ClauseKey.NOTICE_PERIOD_TO_TERMINATE_RENEWAL] = _uncertain()
+    out = _run_eval(monkeypatch, tmp_path, judgments)
+    result = cli_runner.invoke(app, ["report", "--run", str(out / "t-run.jsonl")])
+    assert result.exit_code == 0
+    assert "模糊率 17.0%（1/6）" in result.output
+
+
+def test_report_recompute_yields_identical_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FR-7：同一输入连续重算两次，输出字符串完全一致。"""
+    out = _run_eval(monkeypatch, tmp_path, _uniform(_present(0.9)))
+    args = ["report", "--run", str(out / "t-run.jsonl")]
+    first = cli_runner.invoke(app, args)
+    second = cli_runner.invoke(app, args)
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert first.output == second.output
+
+
+def test_eval_downgrades_present_with_unlocatable_quotes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FR-2 端到端：判定「有」但引用全部无法定位 → 降级模糊并转人工。"""
+    _install_cuad(monkeypatch, tmp_path)
+    _install(monkeypatch, _uniform(_present(0.95, quote="NOT IN TEXT")))
+    out = tmp_path / "out"
+    result = cli_runner.invoke(app, _eval_args(out))
+    assert result.exit_code == 0
+    assert "6 条 · OK 6 · 失败 0 · 模糊 6" in result.output
+    for record in read_records(out / "t-run.jsonl"):
+        assert record.judgment.present is Presence.UNCERTAIN
+        assert record.judgment.quotes == ("NOT IN TEXT",)  # 引用原文保留
+        assert record.spans[0].valid is False
+        assert record.route is Route.TO_HUMAN
 
 
 def test_report_records_not_in_gold_exit_1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -717,10 +780,10 @@ def test_report_curve_matches_hand_computed_points(
     ]
     assert len(rows) == 2
     first, second = rows
-    assert first.group(1) == "0.200"
-    assert first.group(2) == "0.167"
-    assert first.group(3) == "0.800"
-    assert first.group(4) == "0.833"
-    assert second.group(2) == "0.333"
-    assert second.group(3) == "1.000"
-    assert second.group(4) == "1.000"
+    assert first.group(1) == "0.20"
+    assert first.group(2) == "0.17"
+    assert first.group(3) == "0.80"
+    assert first.group(4) == "0.83"
+    assert second.group(2) == "0.33"
+    assert second.group(3) == "1.00"
+    assert second.group(4) == "1.00"

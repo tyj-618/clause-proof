@@ -530,3 +530,42 @@ def test_p95_latency_small_n_takes_max() -> None:
     report = compute(records, gold_for(records), seed=42)
     # 14 条：ceil(0.95×14)-1 = 13 → 最大值
     assert report.p95_latency_ms == 14.0
+
+
+# ---------- M6 分类别用量指标（T-014） ----------
+
+
+def test_clause_usage_metrics_denominator_is_n_ok() -> None:
+    records = [
+        make_record("c1::GOVERNING_LAW", input_tokens=300, output_tokens=30, latency_ms=100.0),
+        make_record("c2::GOVERNING_LAW", input_tokens=100, output_tokens=10, latency_ms=300.0),
+        make_record(
+            "c3::GOVERNING_LAW", status=Status.LLM_ERROR, input_tokens=999, output_tokens=999
+        ),
+    ]
+    metrics = compute(records, gold_for(records), seed=42).by_clause[0]
+    assert metrics.n_ok == 2
+    assert metrics.mean_input_tokens == pytest.approx(200.0)  # (300+100)/2，失败记录不进分子
+    assert metrics.mean_output_tokens == pytest.approx(20.0)
+    assert metrics.p95_latency_ms == 300.0  # 2 条 OK：ceil(0.95×2)−1 = 1 → 第 2 小
+
+
+def test_clause_mean_cost_counts_cached_in_denominator_at_zero() -> None:
+    records = [
+        make_record("c1::GOVERNING_LAW", input_tokens=125_000, output_tokens=0),
+        make_record("c2::GOVERNING_LAW", input_tokens=125_000, output_tokens=0, cached=True),
+    ]
+    metrics = compute(records, gold_for(records), seed=42).by_clause[0]
+    # 计费 1 条 ¥1（125_000 × ¥8/百万）；缓存命中记 0 但占分母 → 均值 ¥0.5
+    assert metrics.mean_cost_cny == pytest.approx(0.5)
+
+
+def test_clause_usage_metrics_zero_for_class_without_ok_records() -> None:
+    records = [make_record("c1::GOVERNING_LAW")]
+    report = compute(records, gold_for(records), seed=42)
+    empty = report.by_clause[1]  # CAP_ON_LIABILITY：无任何记录
+    assert (empty.n_total, empty.n_ok) == (0, 0)
+    assert empty.mean_input_tokens == 0.0
+    assert empty.mean_output_tokens == 0.0
+    assert empty.mean_cost_cny == 0.0
+    assert empty.p95_latency_ms == 0.0

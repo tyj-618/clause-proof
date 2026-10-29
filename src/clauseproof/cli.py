@@ -193,8 +193,11 @@ def _parse_review_rates(raw: str) -> tuple[float, ...]:
 
 
 def _fmt_opt(value: float | None) -> str:
-    """可选浮点的展示：None 记 "-"（样本不足时不硬编数字）。"""
-    return "-" if value is None else f"{value:.3f}"
+    """可选浮点的展示：None 记 "-"（样本不足时不硬编数字）。
+
+    比率统一保留 2 位小数（FR-7，仅显示层；内部计算与 bootstrap 不取整）。
+    """
+    return "-" if value is None else f"{value:.2f}"
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -454,9 +457,10 @@ def report(
     """报告：从运行 JSONL 与同名 meta 重算指标，可选输出复核率–准确率曲线。
 
     默认输出分类别指标表（n_total / n_decided / n_correct / accuracy /
-    引用准确率 / ECE）与宏平均、模糊率、全局 ECE，不调用模型。--curve 的
-    阈值必须来自另一个运行（--thresholds-from）：阈值只应在开发集上选择，
-    在同一批数据上既拟合又评估会让结果虚高（0003 §3）。
+    引用准确率 / ECE / M6 用量四列：平均输入输出 token、单条成本、p95 延迟）
+    与宏平均、模糊率、全局 ECE，不调用模型；所有比率在显示层保留 2 位小数
+    （FR-7）。--curve 的阈值必须来自另一个运行（--thresholds-from）：阈值只应
+    在开发集上选择，在同一批数据上既拟合又评估会让结果虚高（0003 §3）。
 
     示例：
 
@@ -500,7 +504,11 @@ def report(
 
 
 def _print_report(meta: RunMeta, rep: metrics.Report) -> None:
-    """指标表：分类别六列 + 宏平均 + 模糊率 + 全局 ECE（任务书验收口径）。"""
+    """指标表：分类别判定/引用/ECE 列 + M6 用量四列 + 宏平均 + 模糊率 + 全局 ECE。
+
+    所有比率在显示层统一保留 2 位小数（FR-7）；M6 用量列非比率：token 与
+    p95 为整数、成本保留 3 位（同运行摘要口径）。
+    """
     typer.echo(
         f"运行 {meta.run_id} · split {meta.split} · {meta.n_contracts} contracts · seed {meta.seed}"
     )
@@ -508,6 +516,7 @@ def _print_report(meta: RunMeta, rep: metrics.Report) -> None:
     typer.echo(
         f"{'条款':<{_CLAUSE_COL}}  {'n_total':>7} {'n_decided':>9} {'n_correct':>9}"
         f" {'accuracy':>8} {'引用准确率':>8} {'ECE':>5}"
+        f" {'in_tok':>7} {'out_tok':>8} {'cost¥':>7} {'p95_ms':>7}"
     )
     for clause_metrics in rep.by_clause:
         typer.echo(
@@ -515,9 +524,15 @@ def _print_report(meta: RunMeta, rep: metrics.Report) -> None:
             f"{clause_metrics.n_total:>7} {clause_metrics.n_decided:>9}"
             f" {clause_metrics.n_correct:>9} {_fmt_opt(clause_metrics.accuracy):>8}"
             f" {_fmt_opt(clause_metrics.citation_iou):>8} {_fmt_opt(clause_metrics.ece):>5}"
+            f" {clause_metrics.mean_input_tokens:>7.0f}"
+            f" {clause_metrics.mean_output_tokens:>8.0f}"
+            f" {clause_metrics.mean_cost_cny:>7.3f}"
+            f" {clause_metrics.p95_latency_ms:>7.0f}"
         )
     typer.echo(f"宏平均 accuracy {_fmt_opt(rep.macro_accuracy)}")
-    typer.echo(f"模糊率 {rep.uncertain_rate * 100:.1f}%（{rep.n_uncertain}/{rep.n_total}）")
+    typer.echo(
+        f"模糊率 {round(rep.uncertain_rate, 2) * 100:.1f}%（{rep.n_uncertain}/{rep.n_total}）"
+    )
     typer.echo(f"全局 ECE {_fmt_opt(rep.ece)}")
 
 
@@ -601,11 +616,14 @@ def _point_on(
 
 
 def _print_curve(run_path: Path, source_path: Path, points: Sequence[route.RoutingPoint]) -> None:
-    """曲线表：每行 = 目标复核率、实际复核率、自动通过准确率、复核后准确率。"""
+    """曲线表：每行 = 目标复核率、实际复核率、自动通过准确率、复核后准确率。
+
+    比率在显示层统一保留 2 位小数（FR-7）。
+    """
     typer.echo(f"曲线：阈值拟合自 {source_path.stem}，评估于 {run_path.stem}")
     typer.echo(f"{'目标复核率':>8} {'实际复核率':>8} {'自动通过准确率':>8} {'复核后准确率':>8}")
     for point in points:
         typer.echo(
-            f"{point.target_review_rate:>8.3f} {point.actual_review_rate:>8.3f}"
-            f" {_fmt_opt(point.auto_pass_accuracy):>8} {point.post_review_accuracy:>8.3f}"
+            f"{point.target_review_rate:>8.2f} {point.actual_review_rate:>8.2f}"
+            f" {_fmt_opt(point.auto_pass_accuracy):>8} {point.post_review_accuracy:>8.2f}"
         )
