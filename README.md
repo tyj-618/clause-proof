@@ -142,3 +142,7 @@ Anti-Assignment / Termination For Convenience / Notice Period To Terminate Renew
 | M1 基线（300 条 dev） | `results/m1-baseline-dev.spans-v2.jsonl` | 否 |
 | 协议 A/B（18 条对照） | `results/smoke-t005.jsonl` / `smoke-t006.jsonl` | 否 |
 | M4 曲线（拟合/评估分组） | `results/m1-fit.jsonl` / `m1-eval.jsonl` | 否 |
+
+## 许可证
+
+[MIT](LICENSE)。数据集不随仓库分发，CUAD 的许可条款见其[数据集页面](https://huggingface.co/datasets/theatticusproject/cuad)。
